@@ -53,12 +53,7 @@ Top-level navigation is intentionally small:
 
 ## Screenshots
 
-Screenshots are planned next. The current UI includes:
-- Home checklist view
-- Quick Setup multi-step layout
-- Configuration editor
-- Runtime status/logs
-- Talkgroups & Tags CSV editor
+Screenshots are documented in `docs/SCREENSHOTS.md`. Real captures still need to be added.
 
 ## Local development
 
