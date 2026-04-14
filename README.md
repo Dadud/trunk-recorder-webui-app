@@ -1,34 +1,137 @@
 # trunk-recorder-webui
 
-A super lightweight Web UI for configuring and running [Trunk Recorder](https://github.com/TrunkRecorder/trunk-recorder) in Docker.
+A lightweight Web UI for configuring and running [Trunk Recorder](https://github.com/TrunkRecorder/trunk-recorder) with Docker.
 
-## Goals
-- very easy first-time setup
-- setup wizard for the common path
-- advanced editor for every Trunk Recorder option
-- lightweight runtime with minimal moving parts
-- docker compose deployment
+It is designed to feel like a small self-hosted appliance UI, not a giant dashboard.
 
-## UX design
-- **Setup Wizard** for first boot
-  - recording location
-  - SDR source setup
-  - system type + control channels
-  - logging / upload options
-  - generated `config.json`
-- **Advanced Config**
-  - full JSON editor
-  - form-based editing for global, sources, systems, plugins
-- **Operations**
-  - start / stop / restart stack
-  - logs view
-  - config validation
+## What it does
 
-## Planned architecture
-- small Node server
-- server-rendered HTML + tiny vanilla JS
-- file-backed config storage
-- Docker Compose for `trunk-recorder` + `webui`
+- guided **Quick Setup** flow
+- lightweight **Configuration** editor for Trunk Recorder settings
+- support for **digital and analog** workflows
+- **Talkgroups & Tags** CSV editing
+- **Runtime** page with service controls and logs
+- **Raw Config** editing for power users
 
-## Status
-Initial real scaffold in progress.
+## Current features
+
+### Setup
+- template-based quick start
+- RTL-SDR + P25 template
+- Airspy + P25 template
+- USRP + P25 template
+- RTL-SDR + SmartNet / analog template
+
+### Configuration
+- global settings
+- multi-source editing
+- multi-system editing
+- digital + analog channel settings
+- control channels, modulation, squelch, CSV file paths
+
+### Files
+- per-system talkgroups CSV editing
+- per-system unit tags CSV editing
+- analog-friendly `Mode` editing (`A` / `D`)
+
+### Runtime
+- start / restart / stop services
+- docker compose service status
+- recent logs in the UI
+
+## UI structure
+
+Top-level navigation is intentionally small:
+
+- **Home**
+- **Setup**
+- **Configuration**
+- **Runtime**
+- **Talkgroups & Tags**
+
+`Raw Config` is still available, but intentionally de-emphasized.
+
+## Screenshots
+
+Screenshots are planned next. The current UI includes:
+- Home checklist view
+- Quick Setup multi-step layout
+- Configuration editor
+- Runtime status/logs
+- Talkgroups & Tags CSV editor
+
+## Local development
+
+### Requirements
+- Node.js 22+
+- Docker + Docker Compose
+
+### Run locally
+
+```bash
+npm install
+node app/server.js
+```
+
+Then open:
+
+```text
+http://localhost:8080
+```
+
+## Docker Compose
+
+```yaml
+services:
+  trunk-recorder:
+    image: robotastic/trunk-recorder:latest
+    container_name: trunk-recorder
+    restart: unless-stopped
+    volumes:
+      - ./data/recordings:/recordings
+      - ./config:/config
+    command: ["--config=/config/config.json"]
+
+  webui:
+    image: node:22-alpine
+    container_name: trunk-recorder-webui
+    restart: unless-stopped
+    working_dir: /app
+    command: sh -c "npm install && npm start"
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./:/app
+```
+
+Start the stack:
+
+```bash
+docker compose up -d
+```
+
+## Project goals
+
+- keep the UI **super lightweight**
+- make first setup **easy**
+- keep advanced configuration **available**
+- support both **analog** and **digital** Trunk Recorder workflows
+- stay easy to self-host and hack on
+
+## Roadmap
+
+- stronger validation by system type
+- better visual polish
+- recordings browser
+- import/export helpers
+- packaged image for the web UI
+- screenshots and fuller user docs
+
+## Trunk Recorder reference
+
+This project is a companion UI for:
+- <https://github.com/TrunkRecorder/trunk-recorder>
+
+Local reference docs are stored in:
+- `refs/TRUNKRECORDER_CONFIGURE.md`
+- `refs/TRUNKRECORDER_INSTALL_DOCKER.md`
