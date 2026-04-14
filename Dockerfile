@@ -5,7 +5,6 @@ RUN npm ci --omit=dev
 COPY app ./app
 COPY config ./config
 COPY data ./data
-COPY public ./public
 COPY web ./web
 EXPOSE 8080
 ENV PORT=8080
