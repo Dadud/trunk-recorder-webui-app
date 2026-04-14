@@ -47,7 +47,7 @@ function validateConfig(config) {
 
   (config.sources || []).forEach((s, i) => {
     if (!s.driver) errors.push(`source ${i + 1}: driver is required`);
-    if (!s.center && s.driver !== 'iqfile' && s.driver !== 'sigmffile') errors.push(`source ${i + 1}: center is required`);
+    if (!s.center && !['iqfile', 'sigmffile'].includes(s.driver)) errors.push(`source ${i + 1}: center is required`);
     if (!s.rate) errors.push(`source ${i + 1}: rate is required`);
     if (s.gain === undefined || s.gain === '') errors.push(`source ${i + 1}: gain is required`);
   });
@@ -64,6 +64,70 @@ function esc(str) {
   return String(str ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+function sourceTemplate(kind = 'rtl') {
+  if (kind === 'rtl') {
+    return {
+      driver: 'osmosdr',
+      device: 'rtl=00000001',
+      center: 857000000,
+      rate: 2400000,
+      gain: 30,
+      error: 0,
+      ppm: 0,
+      digitalRecorders: 2,
+      analogRecorders: 0,
+      enabled: true
+    };
+  }
+  if (kind === 'airspy') {
+    return {
+      driver: 'osmosdr',
+      device: 'airspy',
+      center: 857000000,
+      rate: 10000000,
+      gain: 12,
+      error: 0,
+      ppm: 0,
+      digitalRecorders: 4,
+      analogRecorders: 0,
+      enabled: true
+    };
+  }
+  return {
+    driver: 'usrp',
+    device: '',
+    center: 857000000,
+    rate: 8000000,
+    gain: 40,
+    error: 0,
+    ppm: 0,
+    digitalRecorders: 4,
+    analogRecorders: 0,
+    enabled: true
+  };
+}
+
+function systemTemplate(kind = 'p25') {
+  if (kind === 'smartnet') {
+    return {
+      type: 'smartnet',
+      control_channels: [855462500],
+      talkgroupsFile: 'talkgroups.csv',
+      unitTagsFile: 'unit-tags.csv',
+      squelch: -50,
+      modulation: 'qpsk'
+    };
+  }
+  return {
+    type: 'p25',
+    control_channels: [855462500],
+    talkgroupsFile: 'talkgroups.csv',
+    unitTagsFile: 'unit-tags.csv',
+    squelch: -50,
+    modulation: 'qpsk'
+  };
+}
+
 function page(title, body) {
   return `<!doctype html>
   <html>
@@ -73,14 +137,17 @@ function page(title, body) {
       <title>${esc(title)}</title>
       <style>
         body { font-family: system-ui, sans-serif; margin: 0; background: #f6f7fb; color: #101828; }
-        .wrap { max-width: 1100px; margin: 0 auto; padding: 20px; }
+        .wrap { max-width: 1180px; margin: 0 auto; padding: 20px; }
         .card { background: white; border-radius: 16px; padding: 20px; margin-bottom: 16px; box-shadow: 0 2px 10px rgba(16,24,40,.06); }
-        .row { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
+        .subcard { border: 1px solid #eaecf0; border-radius: 14px; padding: 16px; margin-bottom: 14px; }
+        .row { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; }
         label { display: block; font-size: 13px; font-weight: 700; margin-bottom: 6px; }
         input, select, textarea { width: 100%; box-sizing: border-box; padding: 10px 12px; border: 1px solid #d0d5dd; border-radius: 10px; font: inherit; }
         textarea { min-height: 320px; font-family: ui-monospace, SFMono-Regular, monospace; }
         button, .btn { background: #111827; color: white; border: 0; border-radius: 10px; padding: 10px 14px; font: inherit; cursor: pointer; text-decoration: none; display: inline-block; }
         .btn.secondary { background: #475467; }
+        .btn.light { background: #e5e7eb; color: #111827; }
+        .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
         .pill { display: inline-block; background: #eef2ff; color: #3730a3; padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 700; }
         .muted { color: #667085; }
         .nav a { margin-right: 12px; color: #111827; text-decoration: none; font-weight: 700; }
@@ -112,7 +179,7 @@ app.get('/', (req, res) => {
   res.send(page('Overview', `
     <div class="card">
       <h1 class="section-title">Trunk Recorder Web UI</h1>
-      <p class="muted">Lightweight, wizard-first management for Trunk Recorder.</p>
+      <p class="muted">Lightweight, easy to use, and still fully configurable.</p>
       ${errors.length ? `<div class="pill">Needs setup</div>` : `<div class="pill">Config looks valid</div>`}
     </div>
     <div class="card row">
@@ -122,18 +189,41 @@ app.get('/', (req, res) => {
       <div><strong>Capture Dir</strong><br><code>${esc(config.captureDir || './data/recordings')}</code></div>
     </div>
     <div class="card">
-      <h2 class="section-title">Quick actions</h2>
-      <p>
-        <a class="btn" href="/wizard">Run setup wizard</a>
-        <a class="btn secondary" href="/configurator">Edit sources and systems</a>
-        <a class="btn secondary" href="/status">Check runtime status</a>
-      </p>
+      <h2 class="section-title">Templates</h2>
+      <p class="muted">Quick-start presets to avoid a blank screen.</p>
+      <div class="actions">
+        <a class="btn" href="/template/rtl-p25">RTL-SDR + P25</a>
+        <a class="btn secondary" href="/template/airspy-p25">Airspy + P25</a>
+        <a class="btn light" href="/template/usrp-p25">USRP + P25</a>
+      </div>
     </div>
     <div class="card">
       <h2 class="section-title">Validation</h2>
       ${errors.length ? errors.map(e => `<div class="error">${esc(e)}</div>`).join('') : '<div class="ok">No obvious config problems found.</div>'}
     </div>
   `));
+});
+
+app.get('/template/:name', (req, res) => {
+  const config = readConfig();
+  const name = req.params.name;
+  config.ver = 2;
+  config.captureDir = './data/recordings';
+  config.logLevel = 'info';
+  config.callTimeout = 3;
+  if (name === 'rtl-p25') {
+    config.sources = [sourceTemplate('rtl')];
+    config.systems = [systemTemplate('p25')];
+  } else if (name === 'airspy-p25') {
+    config.sources = [sourceTemplate('airspy')];
+    config.systems = [systemTemplate('p25')];
+  } else {
+    config.sources = [sourceTemplate('usrp')];
+    config.systems = [systemTemplate('p25')];
+  }
+  if (!Array.isArray(config.plugins)) config.plugins = [];
+  writeConfig(config);
+  res.redirect('/configurator');
 });
 
 app.get('/wizard', (req, res) => {
@@ -148,6 +238,7 @@ app.get('/wizard', (req, res) => {
         <div class="row">
           <div><label>Capture directory</label><input name="captureDir" value="${esc(config.captureDir || './data/recordings')}" /></div>
           <div><label>Log level</label><select name="logLevel">${['trace','debug','info','warning','error','fatal'].map(v => `<option ${config.logLevel===v?'selected':''}>${v}</option>`).join('')}</select></div>
+          <div><label>Template</label><select name="template"><option value="custom">Custom</option><option value="rtl-p25">RTL-SDR + P25</option><option value="airspy-p25">Airspy + P25</option><option value="usrp-p25">USRP + P25</option></select></div>
         </div>
         <div class="row">
           <div><label>Source driver</label><select name="source_driver">${['osmosdr','usrp','iqfile','sigmffile'].map(v => `<option ${source.driver===v?'selected':''}>${v}</option>`).join('')}</select></div>
@@ -185,25 +276,39 @@ app.post('/wizard', (req, res) => {
   config.ver = 2;
   config.captureDir = b.captureDir || './data/recordings';
   config.logLevel = b.logLevel || 'info';
-  config.sources = [{
-    driver: b.source_driver,
-    device: b.source_device || '',
-    center: Number(b.source_center || 0),
-    rate: Number(b.source_rate || 0),
-    gain: Number(b.source_gain || 0),
-    error: Number(b.source_error || 0),
-    ppm: Number(b.source_ppm || 0),
-    digitalRecorders: Number(b.source_digitalRecorders || 2),
-    enabled: true
-  }];
-  config.systems = [{
-    type: b.system_type,
-    control_channels: String(b.system_control_channels || '').split(',').map(v => v.trim()).filter(Boolean).map(v => Number(v)),
-    modulation: b.system_modulation || 'qpsk',
-    talkgroupsFile: b.system_talkgroupsFile || 'talkgroups.csv',
-    unitTagsFile: b.system_unitTagsFile || 'unit-tags.csv',
-    squelch: Number(b.system_squelch || -50)
-  }];
+
+  if (b.template === 'rtl-p25') {
+    config.sources = [sourceTemplate('rtl')];
+    config.systems = [systemTemplate('p25')];
+  } else if (b.template === 'airspy-p25') {
+    config.sources = [sourceTemplate('airspy')];
+    config.systems = [systemTemplate('p25')];
+  } else if (b.template === 'usrp-p25') {
+    config.sources = [sourceTemplate('usrp')];
+    config.systems = [systemTemplate('p25')];
+  } else {
+    config.sources = [{
+      driver: b.source_driver,
+      device: b.source_device || '',
+      center: Number(b.source_center || 0),
+      rate: Number(b.source_rate || 0),
+      gain: Number(b.source_gain || 0),
+      error: Number(b.source_error || 0),
+      ppm: Number(b.source_ppm || 0),
+      digitalRecorders: Number(b.source_digitalRecorders || 2),
+      analogRecorders: 0,
+      enabled: true
+    }];
+    config.systems = [{
+      type: b.system_type,
+      control_channels: String(b.system_control_channels || '').split(',').map(v => v.trim()).filter(Boolean).map(v => Number(v)),
+      modulation: b.system_modulation || 'qpsk',
+      talkgroupsFile: b.system_talkgroupsFile || 'talkgroups.csv',
+      unitTagsFile: b.system_unitTagsFile || 'unit-tags.csv',
+      squelch: Number(b.system_squelch || -50)
+    }];
+  }
+
   if (!Array.isArray(config.plugins)) config.plugins = [];
   writeConfig(config);
   res.redirect('/configurator');
@@ -211,36 +316,60 @@ app.post('/wizard', (req, res) => {
 
 app.get('/configurator', (req, res) => {
   const config = readConfig();
-  const sources = config.sources?.length ? config.sources : [{ driver: 'osmosdr', enabled: true }];
-  const systems = config.systems?.length ? config.systems : [{ type: 'p25', modulation: 'qpsk' }];
+  const sources = config.sources?.length ? config.sources : [sourceTemplate('rtl')];
+  const systems = config.systems?.length ? config.systems : [systemTemplate('p25')];
 
   res.send(page('Configurator', `
     <div class="card">
       <h1 class="section-title">Configurator</h1>
-      <p class="muted">Edit multiple sources and systems without dropping into raw JSON.</p>
+      <p class="muted">Edit sources and systems with forms, not just raw JSON.</p>
+      <div class="actions">
+        <a class="btn light" href="/configurator/add-source/rtl">Add RTL source</a>
+        <a class="btn light" href="/configurator/add-source/airspy">Add Airspy source</a>
+        <a class="btn light" href="/configurator/add-source/usrp">Add USRP source</a>
+        <a class="btn light" href="/configurator/add-system/p25">Add P25 system</a>
+        <a class="btn light" href="/configurator/add-system/smartnet">Add SmartNet system</a>
+      </div>
+    </div>
+    <div class="card">
       <form method="post" action="/configurator">
         <div class="row">
           <div><label>Capture directory</label><input name="captureDir" value="${esc(config.captureDir || './data/recordings')}" /></div>
           <div><label>Log level</label><select name="logLevel">${['trace','debug','info','warning','error','fatal'].map(v => `<option ${config.logLevel===v?'selected':''}>${v}</option>`).join('')}</select></div>
           <div><label>Call timeout</label><input name="callTimeout" value="${esc(config.callTimeout ?? 3)}" /></div>
+          <div><label>Default mode</label><select name="defaultMode">${['digital','analog'].map(v => `<option ${config.defaultMode===v?'selected':''}>${v}</option>`).join('')}</select></div>
         </div>
+        <div class="row">
+          <div><label>Control warn rate</label><input name="controlWarnRate" value="${esc(config.controlWarnRate ?? 10)}" /></div>
+          <div><label>Status server</label><input name="statusServer" value="${esc(config.statusServer || '')}" /></div>
+          <div><label>Upload server</label><input name="uploadServer" value="${esc(config.uploadServer || '')}" /></div>
+          <div><label>Broadcastify server</label><input name="broadcastifyCallsServer" value="${esc(config.broadcastifyCallsServer || '')}" /></div>
+        </div>
+
         <h2>Sources</h2>
         ${sources.map((s, i) => `
-          <div class="card">
+          <div class="subcard">
+            <div class="actions" style="justify-content: space-between;">
+              <strong>Source ${i + 1}</strong>
+              <a class="btn light" href="/configurator/remove-source/${i}">Remove</a>
+            </div>
             <div class="row">
               <div><label>Driver</label><select name="source_${i}_driver">${['osmosdr','usrp','iqfile','sigmffile'].map(v => `<option ${s.driver===v?'selected':''}>${v}</option>`).join('')}</select></div>
               <div><label>Device</label><input name="source_${i}_device" value="${esc(s.device || '')}" /></div>
               <div><label>Enabled</label><select name="source_${i}_enabled"><option ${s.enabled !== false ? 'selected' : ''}>true</option><option ${s.enabled === false ? 'selected' : ''}>false</option></select></div>
+              <div><label>Antenna</label><input name="source_${i}_antenna" value="${esc(s.antenna || '')}" /></div>
             </div>
             <div class="row">
               <div><label>Center</label><input name="source_${i}_center" value="${esc(s.center || '')}" /></div>
               <div><label>Rate</label><input name="source_${i}_rate" value="${esc(s.rate || '')}" /></div>
               <div><label>Gain</label><input name="source_${i}_gain" value="${esc(s.gain || '')}" /></div>
+              <div><label>AGC</label><select name="source_${i}_agc"><option ${s.agc ? 'selected' : ''}>true</option><option ${!s.agc ? 'selected' : ''}>false</option></select></div>
             </div>
             <div class="row">
               <div><label>Error</label><input name="source_${i}_error" value="${esc(s.error ?? 0)}" /></div>
               <div><label>PPM</label><input name="source_${i}_ppm" value="${esc(s.ppm ?? 0)}" /></div>
               <div><label>Digital recorders</label><input name="source_${i}_digitalRecorders" value="${esc(s.digitalRecorders || '')}" /></div>
+              <div><label>Analog recorders</label><input name="source_${i}_analogRecorders" value="${esc(s.analogRecorders || '')}" /></div>
             </div>
           </div>
         `).join('')}
@@ -248,16 +377,22 @@ app.get('/configurator', (req, res) => {
 
         <h2>Systems</h2>
         ${systems.map((s, i) => `
-          <div class="card">
+          <div class="subcard">
+            <div class="actions" style="justify-content: space-between;">
+              <strong>System ${i + 1}</strong>
+              <a class="btn light" href="/configurator/remove-system/${i}">Remove</a>
+            </div>
             <div class="row">
               <div><label>Type</label><select name="system_${i}_type">${['p25','smartnet'].map(v => `<option ${s.type===v?'selected':''}>${v}</option>`).join('')}</select></div>
               <div><label>Modulation</label><input name="system_${i}_modulation" value="${esc(s.modulation || 'qpsk')}" /></div>
               <div><label>Squelch</label><input name="system_${i}_squelch" value="${esc(s.squelch ?? -50)}" /></div>
+              <div><label>Talkgroup display format</label><input name="system_${i}_shortName" value="${esc(s.shortName || '')}" placeholder="optional label" /></div>
             </div>
             <div class="row">
               <div><label>Control channels</label><input name="system_${i}_control_channels" value="${esc((s.control_channels || []).join(', '))}" /></div>
               <div><label>Talkgroups file</label><input name="system_${i}_talkgroupsFile" value="${esc(s.talkgroupsFile || '')}" /></div>
               <div><label>Unit tags file</label><input name="system_${i}_unitTagsFile" value="${esc(s.unitTagsFile || '')}" /></div>
+              <div><label>Audio archive</label><select name="system_${i}_audioArchive"><option ${s.audioArchive ? 'selected' : ''}>true</option><option ${!s.audioArchive ? 'selected' : ''}>false</option></select></div>
             </div>
           </div>
         `).join('')}
@@ -268,6 +403,42 @@ app.get('/configurator', (req, res) => {
   `));
 });
 
+app.get('/configurator/add-source/:kind', (req, res) => {
+  const config = readConfig();
+  if (!Array.isArray(config.sources)) config.sources = [];
+  config.sources.push(sourceTemplate(req.params.kind));
+  writeConfig(config);
+  res.redirect('/configurator');
+});
+
+app.get('/configurator/remove-source/:index', (req, res) => {
+  const config = readConfig();
+  const index = Number(req.params.index);
+  if (Array.isArray(config.sources) && config.sources.length > 1) {
+    config.sources.splice(index, 1);
+    writeConfig(config);
+  }
+  res.redirect('/configurator');
+});
+
+app.get('/configurator/add-system/:kind', (req, res) => {
+  const config = readConfig();
+  if (!Array.isArray(config.systems)) config.systems = [];
+  config.systems.push(systemTemplate(req.params.kind));
+  writeConfig(config);
+  res.redirect('/configurator');
+});
+
+app.get('/configurator/remove-system/:index', (req, res) => {
+  const config = readConfig();
+  const index = Number(req.params.index);
+  if (Array.isArray(config.systems) && config.systems.length > 1) {
+    config.systems.splice(index, 1);
+    writeConfig(config);
+  }
+  res.redirect('/configurator');
+});
+
 app.post('/configurator', (req, res) => {
   const b = req.body;
   const config = readConfig();
@@ -275,18 +446,26 @@ app.post('/configurator', (req, res) => {
   config.captureDir = b.captureDir || './data/recordings';
   config.logLevel = b.logLevel || 'info';
   config.callTimeout = Number(b.callTimeout || 3);
+  config.defaultMode = b.defaultMode || 'digital';
+  config.controlWarnRate = Number(b.controlWarnRate || 10);
+  config.statusServer = b.statusServer || '';
+  config.uploadServer = b.uploadServer || '';
+  config.broadcastifyCallsServer = b.broadcastifyCallsServer || '';
 
   const sourceCount = Number(b.source_count || 0);
   config.sources = Array.from({ length: sourceCount }).map((_, i) => ({
     driver: b[`source_${i}_driver`],
     device: b[`source_${i}_device`] || '',
     enabled: b[`source_${i}_enabled`] !== 'false',
+    antenna: b[`source_${i}_antenna`] || '',
     center: Number(b[`source_${i}_center`] || 0),
     rate: Number(b[`source_${i}_rate`] || 0),
     gain: Number(b[`source_${i}_gain`] || 0),
+    agc: b[`source_${i}_agc`] === 'true',
     error: Number(b[`source_${i}_error`] || 0),
     ppm: Number(b[`source_${i}_ppm`] || 0),
-    digitalRecorders: Number(b[`source_${i}_digitalRecorders`] || 0)
+    digitalRecorders: Number(b[`source_${i}_digitalRecorders`] || 0),
+    analogRecorders: Number(b[`source_${i}_analogRecorders`] || 0)
   }));
 
   const systemCount = Number(b.system_count || 0);
@@ -294,9 +473,11 @@ app.post('/configurator', (req, res) => {
     type: b[`system_${i}_type`],
     modulation: b[`system_${i}_modulation`] || 'qpsk',
     squelch: Number(b[`system_${i}_squelch`] || -50),
+    shortName: b[`system_${i}_shortName`] || '',
     control_channels: String(b[`system_${i}_control_channels`] || '').split(',').map(v => v.trim()).filter(Boolean).map(v => Number(v)),
     talkgroupsFile: b[`system_${i}_talkgroupsFile`] || '',
-    unitTagsFile: b[`system_${i}_unitTagsFile`] || ''
+    unitTagsFile: b[`system_${i}_unitTagsFile`] || '',
+    audioArchive: b[`system_${i}_audioArchive`] === 'true'
   }));
 
   if (!Array.isArray(config.plugins)) config.plugins = [];
