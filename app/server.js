@@ -16,73 +16,48 @@ app.use(express.json());
 
 function ensureConfig() {
   if (!fs.existsSync(configDir)) fs.mkdirSync(configDir, { recursive: true });
-  if (!fs.existsSync(configPath)) {
-    fs.writeFileSync(configPath, JSON.stringify({ ver: 2, sources: [], systems: [], plugins: [] }, null, 2));
-  }
+  if (!fs.existsSync(configPath)) fs.writeFileSync(configPath, JSON.stringify({ ver: 2, sources: [], systems: [], plugins: [] }, null, 2));
 }
-
 function ensureTextFile(file, content = '') {
   const p = path.join(root, file);
   fs.mkdirSync(path.dirname(p), { recursive: true });
   if (!fs.existsSync(p)) fs.writeFileSync(p, content);
   return p;
 }
-
-function readConfig() {
-  ensureConfig();
-  return JSON.parse(fs.readFileSync(configPath, 'utf8'));
-}
-
-function writeConfig(config) {
-  ensureConfig();
-  fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
-}
-
+function readConfig() { ensureConfig(); return JSON.parse(fs.readFileSync(configPath, 'utf8')); }
+function writeConfig(config) { ensureConfig(); fs.writeFileSync(configPath, JSON.stringify(config, null, 2)); }
 function shell(cmd) {
-  try {
-    return execSync(cmd, { cwd: root, stdio: ['ignore', 'pipe', 'pipe'] }).toString();
-  } catch (err) {
-    return (err.stdout?.toString() || '') + (err.stderr?.toString() || err.message);
-  }
+  try { return execSync(cmd, { cwd: root, stdio: ['ignore', 'pipe', 'pipe'] }).toString(); }
+  catch (err) { return (err.stdout?.toString() || '') + (err.stderr?.toString() || err.message); }
 }
-
 function validateConfig(config) {
   const errors = [];
   if (config.ver !== 2) errors.push('Config version must be 2.');
   if (!Array.isArray(config.sources) || config.sources.length === 0) errors.push('Add at least one radio source.');
   if (!Array.isArray(config.systems) || config.systems.length === 0) errors.push('Add at least one radio system.');
-
   (config.sources || []).forEach((s, i) => {
     if (!s.driver) errors.push(`Source ${i + 1}: choose a driver.`);
     if (!s.center && !['iqfile', 'sigmffile'].includes(s.driver)) errors.push(`Source ${i + 1}: add a center frequency.`);
     if (!s.rate) errors.push(`Source ${i + 1}: add a sample rate.`);
     if (s.gain === undefined || s.gain === '') errors.push(`Source ${i + 1}: add a gain value.`);
   });
-
   (config.systems || []).forEach((s, i) => {
     if (!s.type) errors.push(`System ${i + 1}: choose a system type.`);
     if (!Array.isArray(s.control_channels) || s.control_channels.length === 0) errors.push(`System ${i + 1}: add at least one control channel.`);
     if (s.type === 'smartnet' && !s.modulation) errors.push(`System ${i + 1}: set modulation for this analog-capable system.`);
   });
-
   return errors;
 }
-
-function esc(str) {
-  return String(str ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+function esc(str) { return String(str ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function sourceTemplate(kind='rtl') {
+  if (kind==='rtl') return { driver:'osmosdr', device:'rtl=00000001', center:857000000, rate:2400000, gain:30, error:0, ppm:0, digitalRecorders:2, analogRecorders:0, enabled:true };
+  if (kind==='airspy') return { driver:'osmosdr', device:'airspy', center:857000000, rate:10000000, gain:12, error:0, ppm:0, digitalRecorders:4, analogRecorders:0, enabled:true };
+  return { driver:'usrp', device:'', center:857000000, rate:8000000, gain:40, error:0, ppm:0, digitalRecorders:4, analogRecorders:0, enabled:true };
 }
-
-function sourceTemplate(kind = 'rtl') {
-  if (kind === 'rtl') return { driver: 'osmosdr', device: 'rtl=00000001', center: 857000000, rate: 2400000, gain: 30, error: 0, ppm: 0, digitalRecorders: 2, analogRecorders: 0, enabled: true };
-  if (kind === 'airspy') return { driver: 'osmosdr', device: 'airspy', center: 857000000, rate: 10000000, gain: 12, error: 0, ppm: 0, digitalRecorders: 4, analogRecorders: 0, enabled: true };
-  return { driver: 'usrp', device: '', center: 857000000, rate: 8000000, gain: 40, error: 0, ppm: 0, digitalRecorders: 4, analogRecorders: 0, enabled: true };
+function systemTemplate(kind='p25') {
+  if (kind==='smartnet') return { type:'smartnet', control_channels:[855462500], talkgroupsFile:'talkgroups.csv', unitTagsFile:'unit-tags.csv', squelch:-50, modulation:'qpsk', audioArchive:false };
+  return { type:'p25', control_channels:[855462500], talkgroupsFile:'talkgroups.csv', unitTagsFile:'unit-tags.csv', squelch:-50, modulation:'qpsk', audioArchive:false };
 }
-
-function systemTemplate(kind = 'p25') {
-  if (kind === 'smartnet') return { type: 'smartnet', control_channels: [855462500], talkgroupsFile: 'talkgroups.csv', unitTagsFile: 'unit-tags.csv', squelch: -50, modulation: 'qpsk', audioArchive: false };
-  return { type: 'p25', control_channels: [855462500], talkgroupsFile: 'talkgroups.csv', unitTagsFile: 'unit-tags.csv', squelch: -50, modulation: 'qpsk', audioArchive: false };
-}
-
 function layout(title, body) {
   return `<!doctype html><html><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" /><title>${esc(title)}</title><style>
   body { font-family: Inter, system-ui, sans-serif; margin: 0; background: #f5f7fb; color: #101828; }
@@ -107,6 +82,9 @@ function layout(title, body) {
   .error { background: #fef3f2; color: #b42318; padding: 10px 12px; border-radius: 10px; margin-bottom: 8px; }
   .ok { background: #ecfdf3; color: #027a48; padding: 10px 12px; border-radius: 10px; margin-bottom: 8px; }
   .note { background: #f8fafc; color: #475467; padding: 12px; border-radius: 12px; }
+  .steps { display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; }
+  .step { background:#eef2ff; color:#3730a3; padding:6px 10px; border-radius:999px; font-size:12px; font-weight:700; }
+  .badge { display:inline-block; padding:3px 8px; border-radius:999px; font-size:11px; font-weight:700; background:#ecfdf3; color:#027a48; }
   pre { white-space: pre-wrap; word-break: break-word; background: #0b1020; color: #e5e7eb; padding: 14px; border-radius: 12px; overflow: auto; }
   h1,h2,h3 { margin-top: 0; }
   .footer-link { margin-top: 12px; }
@@ -117,31 +95,13 @@ app.get('/', (req, res) => {
   const config = readConfig();
   const errors = validateConfig(config);
   const isValid = errors.length === 0;
+  const ps = shell('docker compose ps');
+  const running = /Up|running/i.test(ps);
   res.send(layout('Home', `
-    <div class="card">
-      <h1>Home</h1>
-      <p class="muted">This page should answer three things quickly: is setup complete, is the config valid, and what should you do next?</p>
-      ${isValid ? '<div class="chip">Ready to run</div>' : '<div class="chip">Setup needed</div>'}
-    </div>
-    <div class="card row">
-      <div><strong>Sources</strong><br>${config.sources?.length || 0}</div>
-      <div><strong>Systems</strong><br>${config.systems?.length || 0}</div>
-      <div><strong>Default call mode</strong><br>${esc(config.defaultMode || 'digital')}</div>
-      <div><strong>Capture path</strong><br><code>${esc(config.captureDir || './data/recordings')}</code></div>
-    </div>
-    <div class="card">
-      <h2>What to do next</h2>
-      <div class="actions">
-        <a class="btn" href="/setup">1. Quick Setup</a>
-        <a class="btn secondary" href="/configuration">2. Review Configuration</a>
-        <a class="btn light" href="/files">3. Review Talkgroups & Tags</a>
-        <a class="btn light" href="/runtime">4. Start Services</a>
-      </div>
-    </div>
-    <div class="card">
-      <h2>Validation</h2>
-      ${errors.length ? errors.map(e => `<div class="error">${esc(e)}</div>`).join('') : '<div class="ok">No obvious config problems found.</div>'}
-    </div>
+    <div class="card"><h1>Home</h1><p class="muted">Quick snapshot of setup, health, and next steps.</p>${isValid ? '<div class="chip">Config looks valid</div>' : '<div class="chip">Setup needed</div>'} ${running ? '<span class="badge">Services running</span>' : ''}</div>
+    <div class="card row"><div><strong>Sources</strong><br>${config.sources?.length || 0}</div><div><strong>Systems</strong><br>${config.systems?.length || 0}</div><div><strong>Default call mode</strong><br>${esc(config.defaultMode || 'digital')}</div><div><strong>Capture path</strong><br><code>${esc(config.captureDir || './data/recordings')}</code></div></div>
+    <div class="card"><h2>Checklist</h2><div class="steps"><div class="step">1. Choose template</div><div class="step">2. Configure source</div><div class="step">3. Configure system</div><div class="step">4. Review talkgroups</div><div class="step">5. Start services</div></div><div class="actions"><a class="btn" href="/setup">Open Quick Setup</a><a class="btn secondary" href="/configuration">Open Configuration</a><a class="btn light" href="/runtime">Open Runtime</a></div></div>
+    <div class="card"><h2>Validation</h2>${errors.length ? errors.map(e => `<div class="error">${esc(e)}</div>`).join('') : '<div class="ok">No obvious config problems found.</div>'}</div>
   `));
 });
 
@@ -150,284 +110,111 @@ app.get('/setup', (req, res) => {
   const source = config.sources?.[0] || {};
   const system = config.systems?.[0] || {};
   res.send(layout('Setup', `
-    <div class="card">
-      <h1>Quick Setup</h1>
-      <p class="muted">Start with a template if you want the easiest path. You can fine-tune everything afterward.</p>
-      <div class="actions">
-        <a class="btn" href="/template/rtl-p25">RTL-SDR + P25</a>
-        <a class="btn secondary" href="/template/airspy-p25">Airspy + P25</a>
-        <a class="btn light" href="/template/usrp-p25">USRP + P25</a>
-        <a class="btn light" href="/template/rtl-smartnet">RTL-SDR + SmartNet / analog</a>
-      </div>
-    </div>
+    <div class="card"><h1>Quick Setup</h1><p class="muted">A guided setup flow for the common path.</p><div class="steps"><div class="step">1. Template</div><div class="step">2. Radio source</div><div class="step">3. System details</div><div class="step">4. Storage & review</div></div></div>
+    <div class="card"><h2>1. Choose a template</h2><p class="muted">Start with a template if you want the easiest path.</p><div class="actions"><a class="btn" href="/template/rtl-p25">RTL-SDR + P25 <span class="badge">recommended</span></a><a class="btn secondary" href="/template/airspy-p25">Airspy + P25</a><a class="btn light" href="/template/usrp-p25">USRP + P25</a><a class="btn light" href="/template/rtl-smartnet">RTL-SDR + SmartNet / analog</a></div></div>
     <form method="post" action="/setup">
-      <div class="card">
-        <h2>Choose your setup</h2>
-        <div class="row">
-          <div><label>Capture directory</label><input name="captureDir" value="${esc(config.captureDir || './data/recordings')}" /></div>
-          <div><label>Log level</label><select name="logLevel">${['trace','debug','info','warning','error','fatal'].map(v => `<option ${config.logLevel===v?'selected':''}>${v}</option>`).join('')}</select></div>
-          <div><label>Default call mode</label><select name="defaultMode">${['digital','analog'].map(v => `<option ${config.defaultMode===v?'selected':''}>${v}</option>`).join('')}</select></div>
-        </div>
-      </div>
-      <div class="card">
-        <h2>Radio source</h2>
-        <p class="muted">Choose the SDR settings for your first source.</p>
-        <div class="row">
-          <div><label>Driver</label><select name="source_driver">${['osmosdr','usrp','iqfile','sigmffile'].map(v => `<option ${source.driver===v?'selected':''}>${v}</option>`).join('')}</select></div>
-          <div><label>Device</label><input name="source_device" value="${esc(source.device || '')}" placeholder="rtl=0000001" /></div>
-          <div><label>Center frequency</label><input name="source_center" value="${esc(source.center || '')}" /></div>
-        </div>
-        <div class="row">
-          <div><label>Sample rate</label><input name="source_rate" value="${esc(source.rate || '')}" /></div>
-          <div><label>Gain</label><input name="source_gain" value="${esc(source.gain || '')}" /></div>
-          <div><label>Error (Hz)</label><input name="source_error" value="${esc(source.error ?? 0)}" /></div>
-        </div>
-        <div class="row">
-          <div><label>PPM</label><input name="source_ppm" value="${esc(source.ppm ?? 0)}" /></div>
-          <div><label>Digital channels</label><input name="source_digitalRecorders" value="${esc(source.digitalRecorders || 2)}" /></div>
-          <div><label>Analog channels</label><input name="source_analogRecorders" value="${esc(source.analogRecorders || 0)}" /></div>
-        </div>
-      </div>
-      <div class="card">
-        <h2>System details</h2>
-        <p class="muted">Add one or more always-on control channel frequencies.</p>
-        <div class="row">
-          <div><label>System type</label><select name="system_type">${['p25','smartnet'].map(v => `<option ${system.type===v?'selected':''}>${v}</option>`).join('')}</select></div>
-          <div><label>Control channel frequencies</label><input name="system_control_channels" value="${esc((system.control_channels || []).join(', '))}" /></div>
-          <div><label>Modulation</label><input name="system_modulation" value="${esc(system.modulation || 'qpsk')}" /></div>
-        </div>
-        <div class="row">
-          <div><label>Talkgroups CSV</label><input name="system_talkgroupsFile" value="${esc(system.talkgroupsFile || 'talkgroups.csv')}" /></div>
-          <div><label>Unit tags CSV</label><input name="system_unitTagsFile" value="${esc(system.unitTagsFile || 'unit-tags.csv')}" /></div>
-          <div><label>Squelch</label><input name="system_squelch" value="${esc(system.squelch ?? -50)}" /></div>
-        </div>
-      </div>
-      <div class="card">
-        <h2>Review config</h2>
-        <div class="note">Raw Config is for power users. Most setups should not need it.</div>
-        <div class="actions">
-          <button type="submit">Save Quick Setup</button>
-          <a class="btn light" href="/configuration">Open full configuration</a>
-        </div>
-      </div>
+      <div class="card"><h2>2. Radio source</h2><div class="row"><div><label>Driver</label><select name="source_driver">${['osmosdr','usrp','iqfile','sigmffile'].map(v => `<option ${source.driver===v?'selected':''}>${v}</option>`).join('')}</select></div><div><label>Device</label><input name="source_device" value="${esc(source.device || '')}" placeholder="rtl=0000001" /></div><div><label>Center frequency</label><input name="source_center" value="${esc(source.center || '')}" /></div></div><div class="row"><div><label>Sample rate</label><input name="source_rate" value="${esc(source.rate || '')}" /></div><div><label>Gain</label><input name="source_gain" value="${esc(source.gain || '')}" /></div><div><label>Error (Hz)</label><input name="source_error" value="${esc(source.error ?? 0)}" /></div></div><div class="row"><div><label>PPM</label><input name="source_ppm" value="${esc(source.ppm ?? 0)}" /></div><div><label>Digital channels</label><input name="source_digitalRecorders" value="${esc(source.digitalRecorders || 2)}" /></div><div><label>Analog channels</label><input name="source_analogRecorders" value="${esc(source.analogRecorders || 0)}" /></div></div></div>
+      <div class="card"><h2>3. System details</h2><p class="muted">Use analog if this system carries analog voice traffic by default.</p><div class="row"><div><label>System type</label><select name="system_type">${['p25','smartnet'].map(v => `<option ${system.type===v?'selected':''}>${v}</option>`).join('')}</select></div><div><label>Default call mode</label><select name="defaultMode">${['digital','analog'].map(v => `<option ${config.defaultMode===v?'selected':''}>${v}</option>`).join('')}</select></div><div><label>Control channel frequencies</label><input name="system_control_channels" value="${esc((system.control_channels || []).join(', '))}" /></div></div><div class="row"><div><label>Modulation</label><input name="system_modulation" value="${esc(system.modulation || 'qpsk')}" /></div><div><label>Squelch</label><input name="system_squelch" value="${esc(system.squelch ?? -50)}" /></div><div><label>Talkgroups CSV</label><input name="system_talkgroupsFile" value="${esc(system.talkgroupsFile || 'talkgroups.csv')}" /></div></div><div class="row"><div><label>Unit tags CSV</label><input name="system_unitTagsFile" value="${esc(system.unitTagsFile || 'unit-tags.csv')}" /></div></div></div>
+      <div class="card"><h2>4. Storage and review</h2><div class="row"><div><label>Capture directory</label><input name="captureDir" value="${esc(config.captureDir || './data/recordings')}" /></div><div><label>Log level</label><select name="logLevel">${['trace','debug','info','warning','error','fatal'].map(v => `<option ${config.logLevel===v?'selected':''}>${v}</option>`).join('')}</select></div></div><div class="note">You can fine-tune everything later in Configuration. Raw Config is there for power users only.</div><div class="actions"><button type="submit">Save Quick Setup</button><a class="btn light" href="/configuration">Skip to full configuration</a></div></div>
     </form>
   `));
 });
 
 app.post('/setup', (req, res) => {
-  const b = req.body;
-  const config = readConfig();
-  config.ver = 2;
-  config.captureDir = b.captureDir || './data/recordings';
-  config.logLevel = b.logLevel || 'info';
-  config.defaultMode = b.defaultMode || 'digital';
+  const b = req.body; const config = readConfig();
+  config.ver = 2; config.captureDir = b.captureDir || './data/recordings'; config.logLevel = b.logLevel || 'info'; config.defaultMode = b.defaultMode || 'digital';
   config.sources = [{ driver: b.source_driver, device: b.source_device || '', center: Number(b.source_center || 0), rate: Number(b.source_rate || 0), gain: Number(b.source_gain || 0), error: Number(b.source_error || 0), ppm: Number(b.source_ppm || 0), digitalRecorders: Number(b.source_digitalRecorders || 2), analogRecorders: Number(b.source_analogRecorders || 0), enabled: true }];
   config.systems = [{ type: b.system_type, control_channels: String(b.system_control_channels || '').split(',').map(v => v.trim()).filter(Boolean).map(v => Number(v)), modulation: b.system_modulation || 'qpsk', talkgroupsFile: b.system_talkgroupsFile || 'talkgroups.csv', unitTagsFile: b.system_unitTagsFile || 'unit-tags.csv', squelch: Number(b.system_squelch || -50), audioArchive: false }];
-  config.plugins = config.plugins || [];
-  writeConfig(config);
-  res.redirect('/configuration');
+  config.plugins = config.plugins || []; writeConfig(config); res.redirect('/configuration');
 });
 
 app.get('/template/:name', (req, res) => {
-  const config = readConfig();
-  const name = req.params.name;
-  config.ver = 2;
-  config.captureDir = './data/recordings';
-  config.logLevel = 'info';
-  config.callTimeout = 3;
-  config.plugins = config.plugins || [];
-  if (name === 'rtl-p25') {
-    config.defaultMode = 'digital';
-    config.sources = [sourceTemplate('rtl')];
-    config.systems = [systemTemplate('p25')];
-  } else if (name === 'airspy-p25') {
-    config.defaultMode = 'digital';
-    config.sources = [sourceTemplate('airspy')];
-    config.systems = [systemTemplate('p25')];
-  } else if (name === 'rtl-smartnet') {
-    config.defaultMode = 'analog';
-    const src = sourceTemplate('rtl');
-    src.analogRecorders = 2;
-    config.sources = [src];
-    config.systems = [systemTemplate('smartnet')];
-  } else {
-    config.defaultMode = 'digital';
-    config.sources = [sourceTemplate('usrp')];
-    config.systems = [systemTemplate('p25')];
-  }
-  writeConfig(config);
-  res.redirect('/configuration');
+  const config = readConfig(); const name = req.params.name;
+  config.ver = 2; config.captureDir = './data/recordings'; config.logLevel = 'info'; config.callTimeout = 3; config.plugins = config.plugins || [];
+  if (name === 'rtl-p25') { config.defaultMode = 'digital'; config.sources = [sourceTemplate('rtl')]; config.systems = [systemTemplate('p25')]; }
+  else if (name === 'airspy-p25') { config.defaultMode = 'digital'; config.sources = [sourceTemplate('airspy')]; config.systems = [systemTemplate('p25')]; }
+  else if (name === 'rtl-smartnet') { config.defaultMode = 'analog'; const src = sourceTemplate('rtl'); src.analogRecorders = 2; config.sources = [src]; config.systems = [systemTemplate('smartnet')]; }
+  else { config.defaultMode = 'digital'; config.sources = [sourceTemplate('usrp')]; config.systems = [systemTemplate('p25')]; }
+  writeConfig(config); res.redirect('/configuration');
 });
 
 app.get('/configuration', (req, res) => {
-  const config = readConfig();
-  const sources = config.sources?.length ? config.sources : [sourceTemplate('rtl')];
-  const systems = config.systems?.length ? config.systems : [systemTemplate('p25')];
+  const config = readConfig(); const sources = config.sources?.length ? config.sources : [sourceTemplate('rtl')]; const systems = config.systems?.length ? config.systems : [systemTemplate('p25')];
   res.send(layout('Configuration', `
-    <div class="card">
-      <h1>Configuration</h1>
-      <p class="muted">Structured editing for the real config, without dropping into raw JSON unless you want to.</p>
-      <div class="actions">
-        <a class="btn light" href="/configurator/add-source/rtl">Add RTL source</a>
-        <a class="btn light" href="/configurator/add-source/airspy">Add Airspy source</a>
-        <a class="btn light" href="/configurator/add-source/usrp">Add USRP source</a>
-        <a class="btn light" href="/configurator/add-system/p25">Add P25 system</a>
-        <a class="btn light" href="/configurator/add-system/smartnet">Add SmartNet system</a>
-      </div>
-    </div>
-    <div class="card">
-      <form method="post" action="/configuration">
-        <h2>General</h2>
-        <div class="row">
-          <div><label>Capture directory</label><input name="captureDir" value="${esc(config.captureDir || './data/recordings')}" /></div>
-          <div><label>Log level</label><select name="logLevel">${['trace','debug','info','warning','error','fatal'].map(v => `<option ${config.logLevel===v?'selected':''}>${v}</option>`).join('')}</select></div>
-          <div><label>Call timeout</label><input name="callTimeout" value="${esc(config.callTimeout ?? 3)}" /></div>
-          <div><label>Default call mode</label><select name="defaultMode">${['digital','analog'].map(v => `<option ${config.defaultMode===v?'selected':''}>${v}</option>`).join('')}</select></div>
-        </div>
-        <div class="row">
-          <div><label>Control warn rate</label><input name="controlWarnRate" value="${esc(config.controlWarnRate ?? 10)}" /></div>
-          <div><label>Status server</label><input name="statusServer" value="${esc(config.statusServer || '')}" /></div>
-          <div><label>Upload server</label><input name="uploadServer" value="${esc(config.uploadServer || '')}" /></div>
-          <div><label>Broadcastify server</label><input name="broadcastifyCallsServer" value="${esc(config.broadcastifyCallsServer || '')}" /></div>
-        </div>
-
-        <h2>Sources</h2>
-        ${sources.map((s, i) => `<div class="subcard"><div class="actions" style="justify-content: space-between;"><strong>Source ${i + 1}</strong><a class="btn light" href="/configurator/remove-source/${i}">Remove</a></div><div class="row"><div><label>Driver</label><select name="source_${i}_driver">${['osmosdr','usrp','iqfile','sigmffile'].map(v => `<option ${s.driver===v?'selected':''}>${v}</option>`).join('')}</select></div><div><label>Device</label><input name="source_${i}_device" value="${esc(s.device || '')}" /></div><div><label>Enabled</label><select name="source_${i}_enabled"><option ${s.enabled !== false ? 'selected' : ''}>true</option><option ${s.enabled === false ? 'selected' : ''}>false</option></select></div><div><label>Antenna</label><input name="source_${i}_antenna" value="${esc(s.antenna || '')}" /></div></div><div class="row"><div><label>Center frequency</label><input name="source_${i}_center" value="${esc(s.center || '')}" /></div><div><label>Sample rate</label><input name="source_${i}_rate" value="${esc(s.rate || '')}" /></div><div><label>Gain</label><input name="source_${i}_gain" value="${esc(s.gain || '')}" /></div><div><label>AGC</label><select name="source_${i}_agc"><option ${s.agc ? 'selected' : ''}>true</option><option ${!s.agc ? 'selected' : ''}>false</option></select></div></div><div class="row"><div><label>Error</label><input name="source_${i}_error" value="${esc(s.error ?? 0)}" /></div><div><label>PPM</label><input name="source_${i}_ppm" value="${esc(s.ppm ?? 0)}" /></div><div><label>Digital channels</label><input name="source_${i}_digitalRecorders" value="${esc(s.digitalRecorders || '')}" /></div><div><label>Analog channels</label><input name="source_${i}_analogRecorders" value="${esc(s.analogRecorders || '')}" /></div></div></div>`).join('')}
-        <input type="hidden" name="source_count" value="${sources.length}" />
-
-        <h2>Systems</h2>
-        ${systems.map((s, i) => `<div class="subcard"><div class="actions" style="justify-content: space-between;"><strong>System ${i + 1}</strong><a class="btn light" href="/configurator/remove-system/${i}">Remove</a></div><div class="row"><div><label>Type</label><select name="system_${i}_type">${['p25','smartnet'].map(v => `<option ${s.type===v?'selected':''}>${v}</option>`).join('')}</select></div><div><label>Modulation</label><input name="system_${i}_modulation" value="${esc(s.modulation || 'qpsk')}" /></div><div><label>Squelch</label><input name="system_${i}_squelch" value="${esc(s.squelch ?? -50)}" /></div><div><label>Short label</label><input name="system_${i}_shortName" value="${esc(s.shortName || '')}" /></div></div><div class="row"><div><label>Control channel frequencies</label><input name="system_${i}_control_channels" value="${esc((s.control_channels || []).join(', '))}" /></div><div><label>Talkgroups CSV</label><input name="system_${i}_talkgroupsFile" value="${esc(s.talkgroupsFile || '')}" /></div><div><label>Unit tags CSV</label><input name="system_${i}_unitTagsFile" value="${esc(s.unitTagsFile || '')}" /></div><div><label>Audio archive</label><select name="system_${i}_audioArchive"><option ${s.audioArchive ? 'selected' : ''}>true</option><option ${!s.audioArchive ? 'selected' : ''}>false</option></select></div></div></div>`).join('')}
-        <input type="hidden" name="system_count" value="${systems.length}" />
-
-        <div class="actions"><button type="submit">Save Configuration</button></div>
-      </form>
-      <div class="footer-link"><a href="/advanced">Raw Config</a></div>
-    </div>
+    <div class="card"><h1>Configuration</h1><p class="muted">Structured editing for the real config.</p><div class="actions"><a class="btn light" href="/configurator/add-source/rtl">Add RTL source</a><a class="btn light" href="/configurator/add-source/airspy">Add Airspy source</a><a class="btn light" href="/configurator/add-source/usrp">Add USRP source</a><a class="btn light" href="/configurator/add-system/p25">Add P25 system</a><a class="btn light" href="/configurator/add-system/smartnet">Add SmartNet system</a></div></div>
+    <div class="card"><form method="post" action="/configuration"><h2>General</h2><div class="row"><div><label>Capture directory</label><input name="captureDir" value="${esc(config.captureDir || './data/recordings')}" /></div><div><label>Log level</label><select name="logLevel">${['trace','debug','info','warning','error','fatal'].map(v => `<option ${config.logLevel===v?'selected':''}>${v}</option>`).join('')}</select></div><div><label>Call timeout</label><input name="callTimeout" value="${esc(config.callTimeout ?? 3)}" /></div><div><label>Default call mode</label><select name="defaultMode">${['digital','analog'].map(v => `<option ${config.defaultMode===v?'selected':''}>${v}</option>`).join('')}</select></div></div><div class="row"><div><label>Control warn rate</label><input name="controlWarnRate" value="${esc(config.controlWarnRate ?? 10)}" /></div><div><label>Status server</label><input name="statusServer" value="${esc(config.statusServer || '')}" /></div><div><label>Upload server</label><input name="uploadServer" value="${esc(config.uploadServer || '')}" /></div><div><label>Broadcastify server</label><input name="broadcastifyCallsServer" value="${esc(config.broadcastifyCallsServer || '')}" /></div></div>
+    <h2>Sources</h2>${sources.map((s, i) => `<div class="subcard"><div class="actions" style="justify-content: space-between;"><strong>Source ${i + 1}</strong><a class="btn light" href="/configurator/remove-source/${i}">Remove</a></div><div class="row"><div><label>Driver</label><select name="source_${i}_driver">${['osmosdr','usrp','iqfile','sigmffile'].map(v => `<option ${s.driver===v?'selected':''}>${v}</option>`).join('')}</select></div><div><label>Device</label><input name="source_${i}_device" value="${esc(s.device || '')}" /></div><div><label>Enabled</label><select name="source_${i}_enabled"><option ${s.enabled !== false ? 'selected' : ''}>true</option><option ${s.enabled === false ? 'selected' : ''}>false</option></select></div><div><label>Antenna</label><input name="source_${i}_antenna" value="${esc(s.antenna || '')}" /></div></div><div class="row"><div><label>Center frequency</label><input name="source_${i}_center" value="${esc(s.center || '')}" /></div><div><label>Sample rate</label><input name="source_${i}_rate" value="${esc(s.rate || '')}" /></div><div><label>Gain</label><input name="source_${i}_gain" value="${esc(s.gain || '')}" /></div><div><label>AGC</label><select name="source_${i}_agc"><option ${s.agc ? 'selected' : ''}>true</option><option ${!s.agc ? 'selected' : ''}>false</option></select></div></div><div class="row"><div><label>Error</label><input name="source_${i}_error" value="${esc(s.error ?? 0)}" /></div><div><label>PPM</label><input name="source_${i}_ppm" value="${esc(s.ppm ?? 0)}" /></div><div><label>Digital channels</label><input name="source_${i}_digitalRecorders" value="${esc(s.digitalRecorders || '')}" /></div><div><label>Analog channels</label><input name="source_${i}_analogRecorders" value="${esc(s.analogRecorders || '')}" /></div></div></div>`).join('')}<input type="hidden" name="source_count" value="${sources.length}" />
+    <h2>Systems</h2>${systems.map((s, i) => `<div class="subcard"><div class="actions" style="justify-content: space-between;"><strong>System ${i + 1}</strong><a class="btn light" href="/configurator/remove-system/${i}">Remove</a></div><div class="row"><div><label>Type</label><select name="system_${i}_type">${['p25','smartnet'].map(v => `<option ${s.type===v?'selected':''}>${v}</option>`).join('')}</select></div><div><label>Modulation</label><input name="system_${i}_modulation" value="${esc(s.modulation || 'qpsk')}" /></div><div><label>Squelch</label><input name="system_${i}_squelch" value="${esc(s.squelch ?? -50)}" /></div><div><label>Short label</label><input name="system_${i}_shortName" value="${esc(s.shortName || '')}" /></div></div><div class="row"><div><label>Control channel frequencies</label><input name="system_${i}_control_channels" value="${esc((s.control_channels || []).join(', '))}" /></div><div><label>Talkgroups CSV</label><input name="system_${i}_talkgroupsFile" value="${esc(s.talkgroupsFile || '')}" /></div><div><label>Unit tags CSV</label><input name="system_${i}_unitTagsFile" value="${esc(s.unitTagsFile || '')}" /></div><div><label>Audio archive</label><select name="system_${i}_audioArchive"><option ${s.audioArchive ? 'selected' : ''}>true</option><option ${!s.audioArchive ? 'selected' : ''}>false</option></select></div></div><div class="actions"><a class="btn light" href="/files?system=${i}">Edit files for this system</a></div></div>`).join('')}<input type="hidden" name="system_count" value="${systems.length}" />
+    <div class="actions"><button type="submit">Save Configuration</button></div></form><div class="footer-link"><a href="/advanced">Raw Config</a></div></div>
   `));
 });
 
 app.post('/configuration', (req, res) => {
-  const b = req.body;
-  const config = readConfig();
-  config.ver = 2;
-  config.captureDir = b.captureDir || './data/recordings';
-  config.logLevel = b.logLevel || 'info';
-  config.callTimeout = Number(b.callTimeout || 3);
-  config.defaultMode = b.defaultMode || 'digital';
-  config.controlWarnRate = Number(b.controlWarnRate || 10);
-  config.statusServer = b.statusServer || '';
-  config.uploadServer = b.uploadServer || '';
-  config.broadcastifyCallsServer = b.broadcastifyCallsServer || '';
+  const b = req.body; const config = readConfig();
+  config.ver = 2; config.captureDir = b.captureDir || './data/recordings'; config.logLevel = b.logLevel || 'info'; config.callTimeout = Number(b.callTimeout || 3); config.defaultMode = b.defaultMode || 'digital'; config.controlWarnRate = Number(b.controlWarnRate || 10); config.statusServer = b.statusServer || ''; config.uploadServer = b.uploadServer || ''; config.broadcastifyCallsServer = b.broadcastifyCallsServer || '';
   const sourceCount = Number(b.source_count || 0);
   config.sources = Array.from({ length: sourceCount }).map((_, i) => ({ driver: b[`source_${i}_driver`], device: b[`source_${i}_device`] || '', enabled: b[`source_${i}_enabled`] !== 'false', antenna: b[`source_${i}_antenna`] || '', center: Number(b[`source_${i}_center`] || 0), rate: Number(b[`source_${i}_rate`] || 0), gain: Number(b[`source_${i}_gain`] || 0), agc: b[`source_${i}_agc`] === 'true', error: Number(b[`source_${i}_error`] || 0), ppm: Number(b[`source_${i}_ppm`] || 0), digitalRecorders: Number(b[`source_${i}_digitalRecorders`] || 0), analogRecorders: Number(b[`source_${i}_analogRecorders`] || 0) }));
   const systemCount = Number(b.system_count || 0);
   config.systems = Array.from({ length: systemCount }).map((_, i) => ({ type: b[`system_${i}_type`], modulation: b[`system_${i}_modulation`] || 'qpsk', squelch: Number(b[`system_${i}_squelch`] || -50), shortName: b[`system_${i}_shortName`] || '', control_channels: String(b[`system_${i}_control_channels`] || '').split(',').map(v => v.trim()).filter(Boolean).map(v => Number(v)), talkgroupsFile: b[`system_${i}_talkgroupsFile`] || '', unitTagsFile: b[`system_${i}_unitTagsFile`] || '', audioArchive: b[`system_${i}_audioArchive`] === 'true' }));
   if (!Array.isArray(config.plugins)) config.plugins = [];
-  writeConfig(config);
-  res.redirect('/runtime');
+  writeConfig(config); res.redirect('/runtime');
 });
 
 app.get('/files', (req, res) => {
   const config = readConfig();
-  const tgFile = config.systems?.[0]?.talkgroupsFile || 'talkgroups.csv';
-  const utFile = config.systems?.[0]?.unitTagsFile || 'unit-tags.csv';
+  const systemIndex = Number(req.query.system ?? 0);
+  const system = config.systems?.[systemIndex] || config.systems?.[0] || systemTemplate('p25');
+  const tgFile = system.talkgroupsFile || `talkgroups-${systemIndex + 1}.csv`;
+  const utFile = system.unitTagsFile || `unit-tags-${systemIndex + 1}.csv`;
   ensureTextFile(tgFile, 'Decimal,AlphaTag,Description,Mode\n1001,Dispatch,Main Dispatch,D\n2001,AnalogOps,Analog Operations,A\n');
   ensureTextFile(utFile, 'Radio ID,Tag\n12345,Car 1\n');
   const tg = fs.readFileSync(path.join(root, tgFile), 'utf8');
   const ut = fs.readFileSync(path.join(root, utFile), 'utf8');
   res.send(layout('Talkgroups & Tags', `
-    <div class="card">
-      <h1>Talkgroups & Tags</h1>
-      <p class="muted">Edit the helper CSV files directly. Use <code>Mode</code> values like <code>D</code> for digital and <code>A</code> for analog when your system needs it.</p>
-    </div>
-    <div class="card">
-      <form method="post" action="/files">
-        <div class="row">
-          <div><label>Talkgroups CSV path</label><input name="talkgroupsPath" value="${esc(tgFile)}" /></div>
-          <div><label>Unit tags CSV path</label><input name="unitTagsPath" value="${esc(utFile)}" /></div>
-        </div>
-        <label>Talkgroups CSV</label>
-        <textarea name="talkgroupsCsv">${esc(tg)}</textarea>
-        <label>Unit tags CSV</label>
-        <textarea name="unitTagsCsv">${esc(ut)}</textarea>
-        <div class="actions"><button type="submit">Save CSV files</button></div>
-      </form>
-    </div>
+    <div class="card"><h1>Talkgroups & Tags</h1><p class="muted">Edit helper CSV files for system ${systemIndex + 1}. Use <code>D</code> for digital and <code>A</code> for analog in the <code>Mode</code> column when needed.</p></div>
+    <div class="card"><form method="post" action="/files"><input type="hidden" name="systemIndex" value="${systemIndex}" /><div class="row"><div><label>Talkgroups CSV path</label><input name="talkgroupsPath" value="${esc(tgFile)}" /></div><div><label>Unit tags CSV path</label><input name="unitTagsPath" value="${esc(utFile)}" /></div></div><label>Talkgroups CSV</label><textarea name="talkgroupsCsv">${esc(tg)}</textarea><label>Unit tags CSV</label><textarea name="unitTagsCsv">${esc(ut)}</textarea><div class="actions"><button type="submit">Save CSV files</button></div></form></div>
   `));
 });
 
 app.post('/files', (req, res) => {
-  const tgPath = req.body.talkgroupsPath || 'talkgroups.csv';
-  const utPath = req.body.unitTagsPath || 'unit-tags.csv';
-  ensureTextFile(tgPath);
-  ensureTextFile(utPath);
+  const systemIndex = Number(req.body.systemIndex || 0);
+  const tgPath = req.body.talkgroupsPath || `talkgroups-${systemIndex + 1}.csv`;
+  const utPath = req.body.unitTagsPath || `unit-tags-${systemIndex + 1}.csv`;
+  ensureTextFile(tgPath); ensureTextFile(utPath);
   fs.writeFileSync(path.join(root, tgPath), req.body.talkgroupsCsv || '');
   fs.writeFileSync(path.join(root, utPath), req.body.unitTagsCsv || '');
   const config = readConfig();
-  if (config.systems?.[0]) {
-    config.systems[0].talkgroupsFile = tgPath;
-    config.systems[0].unitTagsFile = utPath;
+  if (config.systems?.[systemIndex]) {
+    config.systems[systemIndex].talkgroupsFile = tgPath;
+    config.systems[systemIndex].unitTagsFile = utPath;
     writeConfig(config);
   }
-  res.redirect('/files');
+  res.redirect(`/files?system=${systemIndex}`);
 });
 
 app.get('/advanced', (req, res) => {
-  const config = readConfig();
-  const errors = validateConfig(config);
-  res.send(layout('Raw Config', `
-    <div class="card">
-      <h1>Raw Config</h1>
-      <p class="muted">For power users. Most setups should not need this page.</p>
-      ${errors.length ? errors.map(e => `<div class="error">${esc(e)}</div>`).join('') : '<div class="ok">Config passes lightweight validation.</div>'}
-      <form method="post" action="/advanced">
-        <label>config.json</label>
-        <textarea name="json">${esc(JSON.stringify(config, null, 2))}</textarea>
-        <div class="actions"><button type="submit">Save raw config</button></div>
-      </form>
-    </div>
-  `));
+  const config = readConfig(); const errors = validateConfig(config);
+  res.send(layout('Raw Config', `<div class="card"><h1>Raw Config</h1><p class="muted">For power users. Most setups should not need this page.</p>${errors.length ? errors.map(e => `<div class="error">${esc(e)}</div>`).join('') : '<div class="ok">Config passes lightweight validation.</div>'}<form method="post" action="/advanced"><label>config.json</label><textarea name="json">${esc(JSON.stringify(config, null, 2))}</textarea><div class="actions"><button type="submit">Save raw config</button></div></form></div>`));
 });
-
-app.post('/advanced', (req, res) => {
-  try {
-    const parsed = JSON.parse(req.body.json);
-    writeConfig(parsed);
-    res.redirect('/advanced');
-  } catch (err) {
-    res.status(400).send(layout('Invalid JSON', `<div class="card"><h1>Invalid JSON</h1><div class="error">${esc(err.message)}</div><p><a href="/advanced">Go back</a></p></div>`));
-  }
-});
+app.post('/advanced', (req, res) => { try { const parsed = JSON.parse(req.body.json); writeConfig(parsed); res.redirect('/advanced'); } catch (err) { res.status(400).send(layout('Invalid JSON', `<div class="card"><h1>Invalid JSON</h1><div class="error">${esc(err.message)}</div><p><a href="/advanced">Go back</a></p></div>`)); } });
 
 app.get('/runtime', (req, res) => {
-  const config = readConfig();
-  const errors = validateConfig(config);
+  const errors = validateConfig(readConfig());
   const ps = shell('docker compose ps');
   const logs = shell('docker compose logs --tail=120');
+  const running = /Up|running/i.test(ps);
+  const trunkRunning = /trunk-recorder.*(Up|running)/i.test(ps);
+  const webRunning = /webui.*(Up|running)|trunk-recorder-webui.*(Up|running)/i.test(ps);
   res.send(layout('Runtime', `
-    <div class="card">
-      <h1>Runtime</h1>
-      ${errors.length ? '<div class="error">Fix the configuration warnings before relying on runtime behavior.</div>' : '<div class="ok">Configuration looks valid enough for a first run.</div>'}
-      <div class="actions">
-        <a class="btn" href="/compose/up">Start services</a>
-        <a class="btn secondary" href="/compose/restart">Restart services</a>
-        <a class="btn light" href="/compose/down">Stop services</a>
-      </div>
-    </div>
-    <div class="card">
-      <h2>Service status</h2>
-      <pre>${esc(ps)}</pre>
-    </div>
-    <div class="card">
-      <h2>Recent logs</h2>
-      <pre>${esc(logs)}</pre>
-    </div>
+    <div class="card"><h1>Runtime</h1>${errors.length ? '<div class="error">Fix the configuration warnings before relying on runtime behavior.</div>' : '<div class="ok">Configuration looks valid enough for a first run.</div>'}<div class="actions"><a class="btn" href="/compose/up">Start services</a><a class="btn secondary" href="/compose/restart">Restart services</a><a class="btn light" href="/compose/down">Stop services</a></div></div>
+    <div class="card row"><div><strong>Overall</strong><br>${running ? '<span class="badge">Running</span>' : 'Stopped'}</div><div><strong>Trunk Recorder</strong><br>${trunkRunning ? '<span class="badge">Running</span>' : 'Not running'}</div><div><strong>Web UI</strong><br>${webRunning ? '<span class="badge">Running</span>' : 'Not running'}</div></div>
+    <div class="card"><h2>Service status</h2><pre>${esc(ps)}</pre></div>
+    <div class="card"><h2>Recent logs</h2><pre>${esc(logs)}</pre></div>
   `));
 });
 
 app.get('/compose/:action', (req, res) => {
-  const action = req.params.action;
-  let output = '';
+  const action = req.params.action; let output = '';
   if (action === 'up') output = shell('docker compose up -d');
   else if (action === 'restart') output = shell('docker compose restart');
   else if (action === 'down') output = shell('docker compose down');
@@ -435,41 +222,10 @@ app.get('/compose/:action', (req, res) => {
   res.send(layout('Compose action', `<div class="card"><h1>${esc(action)}</h1><pre>${esc(output)}</pre><p><a class="btn" href="/runtime">Back to runtime</a></p></div>`));
 });
 
-app.get('/configurator/add-source/:kind', (req, res) => {
-  const config = readConfig();
-  if (!Array.isArray(config.sources)) config.sources = [];
-  config.sources.push(sourceTemplate(req.params.kind));
-  writeConfig(config);
-  res.redirect('/configuration');
-});
-
-app.get('/configurator/remove-source/:index', (req, res) => {
-  const config = readConfig();
-  const index = Number(req.params.index);
-  if (Array.isArray(config.sources) && config.sources.length > 1) {
-    config.sources.splice(index, 1);
-    writeConfig(config);
-  }
-  res.redirect('/configuration');
-});
-
-app.get('/configurator/add-system/:kind', (req, res) => {
-  const config = readConfig();
-  if (!Array.isArray(config.systems)) config.systems = [];
-  config.systems.push(systemTemplate(req.params.kind));
-  writeConfig(config);
-  res.redirect('/configuration');
-});
-
-app.get('/configurator/remove-system/:index', (req, res) => {
-  const config = readConfig();
-  const index = Number(req.params.index);
-  if (Array.isArray(config.systems) && config.systems.length > 1) {
-    config.systems.splice(index, 1);
-    writeConfig(config);
-  }
-  res.redirect('/configuration');
-});
+app.get('/configurator/add-source/:kind', (req, res) => { const config = readConfig(); if (!Array.isArray(config.sources)) config.sources = []; config.sources.push(sourceTemplate(req.params.kind)); writeConfig(config); res.redirect('/configuration'); });
+app.get('/configurator/remove-source/:index', (req, res) => { const config = readConfig(); const index = Number(req.params.index); if (Array.isArray(config.sources) && config.sources.length > 1) { config.sources.splice(index, 1); writeConfig(config); } res.redirect('/configuration'); });
+app.get('/configurator/add-system/:kind', (req, res) => { const config = readConfig(); if (!Array.isArray(config.systems)) config.systems = []; config.systems.push(systemTemplate(req.params.kind)); writeConfig(config); res.redirect('/configuration'); });
+app.get('/configurator/remove-system/:index', (req, res) => { const config = readConfig(); const index = Number(req.params.index); if (Array.isArray(config.systems) && config.systems.length > 1) { config.systems.splice(index, 1); writeConfig(config); } res.redirect('/configuration'); });
 
 const port = process.env.PORT || 8080;
 app.listen(port, () => console.log(`webui listening on http://0.0.0.0:${port}`));
