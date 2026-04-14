@@ -1,20 +1,34 @@
 # trunk-recorder-webui
 
-Dockerized Trunk Recorder stack with a web UI for viewing status and managing configuration.
+A super lightweight Web UI for configuring and running [Trunk Recorder](https://github.com/TrunkRecorder/trunk-recorder) in Docker.
 
 ## Goals
-- Run Trunk Recorder in Docker
-- Provide a browser-based UI for:
-  - viewing recorder status
-  - editing configuration
-  - managing talkgroups / sources
-  - inspecting logs and recent activity
-- Keep the setup self-hostable and easy to extend
+- very easy first-time setup
+- setup wizard for the common path
+- advanced editor for every Trunk Recorder option
+- lightweight runtime with minimal moving parts
+- docker compose deployment
 
-## Planned stack
-- `trunk-recorder` container
-- lightweight web UI container
-- docker compose for local deployment
+## UX design
+- **Setup Wizard** for first boot
+  - recording location
+  - SDR source setup
+  - system type + control channels
+  - logging / upload options
+  - generated `config.json`
+- **Advanced Config**
+  - full JSON editor
+  - form-based editing for global, sources, systems, plugins
+- **Operations**
+  - start / stop / restart stack
+  - logs view
+  - config validation
+
+## Planned architecture
+- small Node server
+- server-rendered HTML + tiny vanilla JS
+- file-backed config storage
+- Docker Compose for `trunk-recorder` + `webui`
 
 ## Status
-Scaffold in progress.
+Initial real scaffold in progress.
