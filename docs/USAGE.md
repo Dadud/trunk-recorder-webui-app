@@ -13,6 +13,7 @@ Use **Setup** if you want the fastest path.
 
 Recommended starting point:
 - **RTL-SDR + P25** for common simple setups
+- **RSP1B + P25** when you are using an SDRplay RSP1B
 - **RTL-SDR + SmartNet / analog** when your system needs analog-focused defaults
 
 ### 3. Review Configuration
@@ -69,6 +70,23 @@ The UI supports analog-related setup in a few places:
 
 This project is intentionally small and simple.
 If you need a setting that is not exposed cleanly yet, use **Raw Config**.
+
+## RSP1B note
+
+The repo now ships with a starter `config/config.rsp1b.example.json` for an SDRplay RSP1B using `device: driver=sdrplay`.
+
+Copy it into place before first run:
+
+```bash
+cp config/config.rsp1b.example.json config/config.json
+```
+
+That is a starting point, not guaranteed final tuning. You should still verify:
+- center frequency
+- control channels
+- gain
+- sample rate stability
+- whether your Trunk Recorder container build actually includes working SDRplay support
 
 ## Screenshot status
 

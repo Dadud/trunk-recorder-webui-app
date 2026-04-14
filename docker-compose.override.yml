@@ -1,0 +1,7 @@
+services:
+  trunk-recorder:
+    devices:
+      - /dev/bus/usb:/dev/bus/usb
+    environment:
+      - TZ=UTC
+    privileged: false

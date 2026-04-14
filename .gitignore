@@ -3,3 +3,4 @@ node_modules/
 .env.local
 data/
 config/*.json
+!config/*.example.json

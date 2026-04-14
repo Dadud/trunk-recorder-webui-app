@@ -19,6 +19,7 @@ It is designed to feel like a small self-hosted appliance UI, not a giant dashbo
 - template-based quick start
 - RTL-SDR + P25 template
 - Airspy + P25 template
+- RSP1B + P25 template
 - USRP + P25 template
 - RTL-SDR + SmartNet / analog template
 
@@ -76,6 +77,23 @@ Then open:
 http://localhost:8080
 ```
 
+## Preconfigured RSP1B default
+
+The repo now includes a starter example config at `config/config.rsp1b.example.json` aimed at an SDRplay RSP1B:
+- `driver: osmosdr`
+- `device: driver=sdrplay`
+- `rate: 8000000`
+- `digitalRecorders: 4`
+- `analogRecorders: 2`
+
+Copy it into place with:
+
+```bash
+cp config/config.rsp1b.example.json config/config.json
+```
+
+You will still need to adjust the real control channels, center frequency, gain, and any SDRplay-specific tuning values for your local system.
+
 ## Docker Compose
 
 ```yaml
@@ -106,6 +124,13 @@ Start the stack:
 ```bash
 docker compose up -d
 ```
+
+If the host can see the SDRplay device, `docker-compose.override.yml` is already set up to pass USB devices through to the Trunk Recorder container.
+
+Current known host prerequisites:
+- Docker / Docker Compose must be installed
+- the host must actually see the RSP1B over USB
+- the Trunk Recorder image must have working SDRplay support in its osmosdr stack
 
 ## Project goals
 
