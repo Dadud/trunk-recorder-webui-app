@@ -69,3 +69,9 @@ The UI supports analog-related setup in a few places:
 
 This project is intentionally small and simple.
 If you need a setting that is not exposed cleanly yet, use **Raw Config**.
+
+## Screenshot status
+
+Real screenshots are still pending.
+
+The intended capture set is documented in `docs/SCREENSHOTS.md`, but the current browser-control path on the VM was unstable during screenshot capture. The docs are intentionally honest about that instead of showing fake or outdated images.

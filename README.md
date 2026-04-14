@@ -53,7 +53,9 @@ Top-level navigation is intentionally small:
 
 ## Screenshots
 
-Screenshots are documented in `docs/SCREENSHOTS.md`. Real captures still need to be added.
+Screenshots are documented in `docs/SCREENSHOTS.md`.
+
+Real captures are still pending. The current VM/browser-control path proved unstable during capture work, so the repo documents the intended screenshot set honestly instead of pretending they already exist.
 
 ## Local development
 
@@ -113,14 +115,26 @@ docker compose up -d
 - support both **analog** and **digital** Trunk Recorder workflows
 - stay easy to self-host and hack on
 
+## MVP status
+
+This project is at a usable MVP stage now:
+- guided setup works
+- analog and digital flows are both represented
+- structured config editing is in place
+- talkgroup and unit-tag CSV editing works
+- runtime controls and logs are available
+
+The main unfinished item from the current pass is real screenshots.
+
 ## Roadmap
 
+Priority order:
+- real screenshots
 - stronger validation by system type
-- better visual polish
+- packaged image for the web UI
 - recordings browser
 - import/export helpers
-- packaged image for the web UI
-- screenshots and fuller user docs
+- better visual polish
 
 ## Trunk Recorder reference
 

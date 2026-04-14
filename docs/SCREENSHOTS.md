@@ -1,8 +1,8 @@
 # Screenshots
 
-Real screenshots are planned.
+Real screenshots are still planned, but not committed yet.
 
-The local browser capture route was blocked in the current environment, so this file documents the intended screenshots to add next.
+The current VM/browser-control path was unstable during capture work, so this file documents the intended screenshots to add next instead of pretending the screenshots already exist.
 
 ## Planned screenshots
 
@@ -43,3 +43,12 @@ Show:
 - `docs/screenshots/configuration.png`
 - `docs/screenshots/runtime.png`
 - `docs/screenshots/talkgroups-tags.png`
+
+## Capture note
+
+Preferred capture order once the browser path is stable:
+1. Home
+2. Setup
+3. Configuration
+4. Runtime
+5. Talkgroups & Tags
