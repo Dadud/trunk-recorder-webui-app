@@ -14,6 +14,9 @@ const app = express();
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
+// In-memory status store for trunk-recorder status
+let trStatus = null;
+
 function ensureConfig() {
   if (!fs.existsSync(configDir)) fs.mkdirSync(configDir, { recursive: true });
   if (!fs.existsSync(configPath)) fs.writeFileSync(configPath, JSON.stringify({ ver: 2, sources: [], systems: [], plugins: [] }, null, 2));
@@ -37,7 +40,7 @@ function validateConfig(config) {
   if (!Array.isArray(config.systems) || config.systems.length === 0) errors.push('Add at least one radio system.');
   (config.sources || []).forEach((s, i) => {
     if (!s.driver) errors.push(`Source ${i + 1}: choose a driver.`);
-    if (!s.center && !['iqfile', 'sigmffile'].includes(s.driver)) errors.push(`Source ${i + 1}: add a center frequency.`);
+    if (!s.center && !['iqfile','sigmffile'].includes(s.driver)) errors.push(`Source ${i + 1}: add a center frequency.`);
     if (!s.rate) errors.push(`Source ${i + 1}: add a sample rate.`);
     if (s.gain === undefined || s.gain === '') errors.push(`Source ${i + 1}: add a gain value.`);
   });
@@ -64,10 +67,8 @@ function layout(title, body) {
   body { font-family: Inter, system-ui, sans-serif; margin: 0; background: #f5f7fb; color: #101828; }
   .wrap { max-width: 1120px; margin: 0 auto; padding: 20px; }
   .header { background: white; border-radius: 18px; padding: 18px 20px; margin-bottom: 16px; box-shadow: 0 2px 10px rgba(16,24,40,.06); }
-  .brand { font-size: 20px; font-weight: 800; }
-  .sub { color: #667085; margin-top: 4px; }
-  .nav { margin-top: 14px; display: flex; gap: 14px; flex-wrap: wrap; }
-  .nav a { text-decoration: none; color: #1d2939; font-weight: 700; }
+  .brand { font-size: 20px; font-weight: 800; } .sub { color: #667085; margin-top: 4px; }
+  .nav { margin-top: 14px; display: flex; gap: 14px; flex-wrap: wrap; } .nav a { text-decoration: none; color: #1d2939; font-weight: 700; }
   .card { background: white; border-radius: 18px; padding: 20px; margin-bottom: 16px; box-shadow: 0 2px 10px rgba(16,24,40,.06); }
   .subcard { border: 1px solid #eaecf0; border-radius: 14px; padding: 16px; margin-bottom: 14px; }
   .row { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; }
@@ -75,22 +76,54 @@ function layout(title, body) {
   input, select, textarea { width: 100%; box-sizing: border-box; padding: 10px 12px; border: 1px solid #d0d5dd; border-radius: 10px; font: inherit; background: #fff; }
   textarea { min-height: 280px; font-family: ui-monospace, monospace; }
   button, .btn { background: #334155; color: white; border: 0; border-radius: 10px; padding: 10px 14px; font: inherit; cursor: pointer; text-decoration: none; display: inline-block; }
-  .btn.secondary { background: #64748b; }
-  .btn.light { background: #e2e8f0; color: #0f172a; }
+  .btn.secondary { background: #64748b; } .btn.light { background: #e2e8f0; color: #0f172a; }
   .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
   .chip { display: inline-block; background: #eef2ff; color: #3730a3; padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 700; }
-  .muted { color: #667085; }
-  .error { background: #fef3f2; color: #b42318; padding: 10px 12px; border-radius: 10px; margin-bottom: 8px; }
+  .muted { color: #667085; } .error { background: #fef3f2; color: #b42318; padding: 10px 12px; border-radius: 10px; margin-bottom: 8px; }
   .ok { background: #ecfdf3; color: #027a48; padding: 10px 12px; border-radius: 10px; margin-bottom: 8px; }
   .note { background: #f8fafc; color: #475467; padding: 12px; border-radius: 12px; }
-  .steps { display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; }
-  .step { background:#eef2ff; color:#3730a3; padding:6px 10px; border-radius:999px; font-size:12px; font-weight:700; }
+  .steps { display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; } .step { background:#eef2ff; color:#3730a3; padding:6px 10px; border-radius:999px; font-size:12px; font-weight:700; }
   .badge { display:inline-block; padding:3px 8px; border-radius:999px; font-size:11px; font-weight:700; background:#ecfdf3; color:#027a48; }
   pre { white-space: pre-wrap; word-break: break-word; background: #0b1020; color: #e5e7eb; padding: 14px; border-radius: 12px; overflow: auto; }
-  h1,h2,h3 { margin-top: 0; }
-  .footer-link { margin-top: 12px; }
+  h1,h2,h3 { margin-top: 0; } .footer-link { margin-top: 12px; }
   </style></head><body><div class="wrap"><div class="header"><div class="brand">Trunk Recorder Web UI</div><div class="sub">Tiny, friendly setup and runtime management for Trunk Recorder</div><div class="nav"><a href="/">Home</a><a href="/setup">Setup</a><a href="/configuration">Configuration</a><a href="/runtime">Runtime</a><a href="/files">Talkgroups & Tags</a></div></div>${body}</div></body></html>`;
 }
+
+// ─── API Routes ───────────────────────────────────────────────────────────────
+
+// Receive status POST from trunk-recorder (SSE push or polling relay)
+app.post('/api/status', (req, res) => {
+  trStatus = req.body;
+  res.json({ ok: true });
+});
+
+// Poll trunk-recorder's management API and return status
+app.get('/api/tr-status', async (req, res) => {
+  const config = readConfig();
+  const apiUrl = config.trApiUrl;
+  const apiToken = config.trApiToken;
+
+  if (!apiUrl) {
+    return res.json({ error: 'trApiUrl not configured in webui settings' });
+  }
+
+  try {
+    const headers = {};
+    if (apiToken) headers['Authorization'] = `Bearer ${apiToken}`;
+
+    // Try the management API runtime endpoint
+    const rtRes = await fetch(`${apiUrl}/api/v1/runtime`, { headers, signal: AbortSignal.timeout(5000) });
+    if (rtRes.ok) {
+      const data = await rtRes.json();
+      return res.json({ connected: true, apiEnabled: data.apiEnabled, reloadRequested: data.reloadRequested, configPath: data.configPath });
+    }
+    return res.json({ connected: false, error: `HTTP ${rtRes.status}` });
+  } catch (err) {
+    return res.json({ connected: false, error: err.message });
+  }
+});
+
+// ─── Pages ───────────────────────────────────────────────────────────────────
 
 app.get('/', (req, res) => {
   const config = readConfig();
@@ -145,6 +178,7 @@ app.get('/configuration', (req, res) => {
   res.send(layout('Configuration', `
     <div class="card"><h1>Configuration</h1><p class="muted">Structured editing for the real config.</p><div class="actions"><a class="btn light" href="/configurator/add-source/rtl">Add RTL source</a><a class="btn light" href="/configurator/add-source/airspy">Add Airspy source</a><a class="btn light" href="/configurator/add-source/rsp1b">Add RSP1B source</a><a class="btn light" href="/configurator/add-source/usrp">Add USRP source</a><a class="btn light" href="/configurator/add-system/p25">Add P25 system</a><a class="btn light" href="/configurator/add-system/smartnet">Add SmartNet system</a></div></div>
     <div class="card"><form method="post" action="/configuration"><h2>General</h2><div class="row"><div><label>Capture directory</label><input name="captureDir" value="${esc(config.captureDir || './data/recordings')}" /></div><div><label>Log level</label><select name="logLevel">${['trace','debug','info','warning','error','fatal'].map(v => `<option ${config.logLevel===v?'selected':''}>${v}</option>`).join('')}</select></div><div><label>Call timeout</label><input name="callTimeout" value="${esc(config.callTimeout ?? 3)}" /></div><div><label>Default call mode</label><select name="defaultMode">${['digital','analog'].map(v => `<option ${config.defaultMode===v?'selected':''}>${v}</option>`).join('')}</select></div></div><div class="row"><div><label>Control warn rate</label><input name="controlWarnRate" value="${esc(config.controlWarnRate ?? 10)}" /></div><div><label>Status server</label><input name="statusServer" value="${esc(config.statusServer || '')}" /></div><div><label>Upload server</label><input name="uploadServer" value="${esc(config.uploadServer || '')}" /></div><div><label>Broadcastify server</label><input name="broadcastifyCallsServer" value="${esc(config.broadcastifyCallsServer || '')}" /></div></div>
+    <div class="card"><h2>Trunk-Recorder Connection</h2><p class="muted">Tell the webui how to reach trunk-recorder's management API for status display.</p><div class="row"><div><label>TR API URL (e.g. http://192.168.1.168:8765)</label><input name="trApiUrl" value="${esc(config.trApiUrl || '')}" placeholder="http://192.168.1.168:8765" /></div><div><label>TR API Token</label><input name="trApiToken" value="${esc(config.trApiToken || '')}" placeholder="API token" /></div></div></div>
     <h2>Sources</h2>${sources.map((s, i) => `<div class="subcard"><div class="actions" style="justify-content: space-between;"><strong>Source ${i + 1}</strong><a class="btn light" href="/configurator/remove-source/${i}">Remove</a></div><div class="row"><div><label>Driver</label><select name="source_${i}_driver">${['osmosdr','usrp','iqfile','sigmffile'].map(v => `<option ${s.driver===v?'selected':''}>${v}</option>`).join('')}</select></div><div><label>Device</label><input name="source_${i}_device" value="${esc(s.device || '')}" /></div><div><label>Enabled</label><select name="source_${i}_enabled"><option ${s.enabled !== false ? 'selected' : ''}>true</option><option ${s.enabled === false ? 'selected' : ''}>false</option></select></div><div><label>Antenna</label><input name="source_${i}_antenna" value="${esc(s.antenna || '')}" /></div></div><div class="row"><div><label>Center frequency</label><input name="source_${i}_center" value="${esc(s.center || '')}" /></div><div><label>Sample rate</label><input name="source_${i}_rate" value="${esc(s.rate || '')}" /></div><div><label>Gain</label><input name="source_${i}_gain" value="${esc(s.gain || '')}" /></div><div><label>AGC</label><select name="source_${i}_agc"><option ${s.agc ? 'selected' : ''}>true</option><option ${!s.agc ? 'selected' : ''}>false</option></select></div></div><div class="row"><div><label>Error</label><input name="source_${i}_error" value="${esc(s.error ?? 0)}" /></div><div><label>PPM</label><input name="source_${i}_ppm" value="${esc(s.ppm ?? 0)}" /></div><div><label>Digital channels</label><input name="source_${i}_digitalRecorders" value="${esc(s.digitalRecorders || '')}" /></div><div><label>Analog channels</label><input name="source_${i}_analogRecorders" value="${esc(s.analogRecorders || '')}" /></div></div></div>`).join('')}<input type="hidden" name="source_count" value="${sources.length}" />
     <h2>Systems</h2>${systems.map((s, i) => `<div class="subcard"><div class="actions" style="justify-content: space-between;"><strong>System ${i + 1}</strong><a class="btn light" href="/configurator/remove-system/${i}">Remove</a></div><div class="row"><div><label>Type</label><select name="system_${i}_type">${['p25','smartnet'].map(v => `<option ${s.type===v?'selected':''}>${v}</option>`).join('')}</select></div><div><label>Modulation</label><input name="system_${i}_modulation" value="${esc(s.modulation || 'qpsk')}" /></div><div><label>Squelch</label><input name="system_${i}_squelch" value="${esc(s.squelch ?? -50)}" /></div><div><label>Short label</label><input name="system_${i}_shortName" value="${esc(s.shortName || '')}" /></div></div><div class="row"><div><label>Control channel frequencies</label><input name="system_${i}_control_channels" value="${esc((s.control_channels || []).join(', '))}" /></div><div><label>Talkgroups CSV</label><input name="system_${i}_talkgroupsFile" value="${esc(s.talkgroupsFile || '')}" /></div><div><label>Unit tags CSV</label><input name="system_${i}_unitTagsFile" value="${esc(s.unitTagsFile || '')}" /></div><div><label>Audio archive</label><select name="system_${i}_audioArchive"><option ${s.audioArchive ? 'selected' : ''}>true</option><option ${!s.audioArchive ? 'selected' : ''}>false</option></select></div></div><div class="actions"><a class="btn light" href="/files?system=${i}">Edit files for this system</a></div></div>`).join('')}<input type="hidden" name="system_count" value="${systems.length}" />
     <div class="actions"><button type="submit">Save Configuration</button></div></form><div class="footer-link"><a href="/advanced">Raw Config</a></div></div>
@@ -153,7 +187,7 @@ app.get('/configuration', (req, res) => {
 
 app.post('/configuration', (req, res) => {
   const b = req.body; const config = readConfig();
-  config.ver = 2; config.captureDir = b.captureDir || './data/recordings'; config.logLevel = b.logLevel || 'info'; config.callTimeout = Number(b.callTimeout || 3); config.defaultMode = b.defaultMode || 'digital'; config.controlWarnRate = Number(b.controlWarnRate || 10); config.statusServer = b.statusServer || ''; config.uploadServer = b.uploadServer || ''; config.broadcastifyCallsServer = b.broadcastifyCallsServer || '';
+  config.ver = 2; config.captureDir = b.captureDir || './data/recordings'; config.logLevel = b.logLevel || 'info'; config.callTimeout = Number(b.callTimeout || 3); config.defaultMode = b.defaultMode || 'digital'; config.controlWarnRate = Number(b.controlWarnRate || 10); config.statusServer = b.statusServer || ''; config.uploadServer = b.uploadServer || ''; config.broadcastifyCallsServer = b.broadcastifyCallsServer || ''; config.trApiUrl = b.trApiUrl || ''; config.trApiToken = b.trApiToken || '';
   const sourceCount = Number(b.source_count || 0);
   config.sources = Array.from({ length: sourceCount }).map((_, i) => ({ driver: b[`source_${i}_driver`], device: b[`source_${i}_device`] || '', enabled: b[`source_${i}_enabled`] !== 'false', antenna: b[`source_${i}_antenna`] || '', center: Number(b[`source_${i}_center`] || 0), rate: Number(b[`source_${i}_rate`] || 0), gain: Number(b[`source_${i}_gain`] || 0), agc: b[`source_${i}_agc`] === 'true', error: Number(b[`source_${i}_error`] || 0), ppm: Number(b[`source_${i}_ppm`] || 0), digitalRecorders: Number(b[`source_${i}_digitalRecorders`] || 0), analogRecorders: Number(b[`source_${i}_analogRecorders`] || 0) }));
   const systemCount = Number(b.system_count || 0);
@@ -200,16 +234,34 @@ app.get('/advanced', (req, res) => {
 });
 app.post('/advanced', (req, res) => { try { const parsed = JSON.parse(req.body.json); writeConfig(parsed); res.redirect('/advanced'); } catch (err) { res.status(400).send(layout('Invalid JSON', `<div class="card"><h1>Invalid JSON</h1><div class="error">${esc(err.message)}</div><p><a href="/advanced">Go back</a></p></div>`)); } });
 
-app.get('/runtime', (req, res) => {
+app.get('/runtime', async (req, res) => {
   const errors = validateConfig(readConfig());
   const ps = shell('docker compose ps');
   const logs = shell('docker compose logs --tail=120');
   const running = /Up|running/i.test(ps);
   const trunkRunning = /trunk-recorder.*(Up|running)/i.test(ps);
   const webRunning = /webui.*(Up|running)|trunk-recorder-webui.*(Up|running)/i.test(ps);
+
+  // Try to get trunk-recorder status via API
+  let trConnected = false;
+  let trInfo = null;
+  try {
+    const config = readConfig();
+    if (config.trApiUrl) {
+      const headers = {};
+      if (config.trApiToken) headers['Authorization'] = `Bearer ${config.trApiToken}`;
+      const rtRes = await fetch(`${config.trApiUrl}/api/v1/runtime`, { headers, signal: AbortSignal.timeout(5000) });
+      if (rtRes.ok) {
+        trConnected = true;
+        trInfo = await rtRes.json();
+      }
+    }
+  } catch (_) {}
+
   res.send(layout('Runtime', `
     <div class="card"><h1>Runtime</h1>${errors.length ? '<div class="error">Fix the configuration warnings before relying on runtime behavior.</div>' : '<div class="ok">Configuration looks valid enough for a first run.</div>'}<div class="actions"><a class="btn" href="/compose/up">Start services</a><a class="btn secondary" href="/compose/restart">Restart services</a><a class="btn light" href="/compose/down">Stop services</a></div></div>
-    <div class="card row"><div><strong>Overall</strong><br>${running ? '<span class="badge">Running</span>' : 'Stopped'}</div><div><strong>Trunk Recorder</strong><br>${trunkRunning ? '<span class="badge">Running</span>' : 'Not running'}</div><div><strong>Web UI</strong><br>${webRunning ? '<span class="badge">Running</span>' : 'Not running'}</div></div>
+    <div class="card row"><div><strong>Overall</strong><br>${running ? '<span class="badge">Running</span>' : 'Stopped'}</div><div><strong>Trunk Recorder</strong><br>${trunkRunning ? '<span class="badge">Running</span>' : trConnected ? '<span class="badge">API Connected</span>' : 'Not running'}</div><div><strong>Web UI</strong><br>${webRunning ? '<span class="badge">Running</span>' : 'Not running'}</div></div>
+    ${trConnected ? `<div class="card"><h2>Trunk-Recorder Status</h2><div class="ok">Connected to TR API — ${trInfo.configPath || 'config loaded'}</div></div>` : ''}
     <div class="card"><h2>Service status</h2><pre>${esc(ps)}</pre></div>
     <div class="card"><h2>Recent logs</h2><pre>${esc(logs)}</pre></div>
   `));
