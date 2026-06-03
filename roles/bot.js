@@ -273,15 +273,10 @@ export function startBot({ dbPath, token, rootConfigPath, postChannelId, alertCh
       await interaction.deferUpdate();
       try {
         const result = await executeSetup(interaction.guild, state, getRootConfig(), dbPath);
-        // Seed default keywords
-        let seeded = 0;
-        if (state.notable === 'yes') {
-          for (const k of DEFAULT_KEYWORDS) {
-            addKeyword(db, k.pattern, result.notableChannelId, null);
-            seeded++;
-          }
-        }
-        // Persist per-guild config
+
+        // ─── Save config FIRST, before seeding keywords. ──────────────────────
+        // A failure in keyword seeding (e.g. transient DB error) must not
+        // roll back the channel creation, which is the expensive part.
         const guildCfg = {
           setupComplete: true,
           setupAt: new Date().toISOString(),
@@ -298,6 +293,21 @@ export function startBot({ dbPath, token, rootConfigPath, postChannelId, alertCh
         saveRootConfig(writeGuildConfig(getRootConfig(), interaction.guildId, guildCfg));
         clearWizardState(interaction.guildId, interaction.user.id);
 
+        // Seed default keywords (after config is saved; failure here is non-fatal)
+        let seeded = 0;
+        let seedError = null;
+        if (state.notable === 'yes' && result.notableChannelId) {
+          try {
+            for (const k of DEFAULT_KEYWORDS) {
+              addKeyword(db, k.pattern, result.notableChannelId, null);
+              seeded++;
+            }
+          } catch (err) {
+            seedError = err.message;
+            log.warn(`[bot] keyword seeding failed (non-fatal): ${err.message}`);
+          }
+        }
+
         const summary = new EmbedBuilder()
           .setTitle('✅ Scanner Bot setup complete')
           .setColor(0x16a34a)
@@ -312,7 +322,7 @@ export function startBot({ dbPath, token, rootConfigPath, postChannelId, alertCh
             '',
             '**Text channels created:**',
             ...result.textChannels.map(c => `• <#${c.id}>`),
-            result.notableChannelId ? `\n**Notable:** <#${result.notableChannelId}> (seeded with ${seeded} default keywords)` : '',
+            result.notableChannelId ? `\n**Notable:** <#${result.notableChannelId}> (seeded with ${seeded} default keywords${seedError ? `, seeding error: ${seedError}` : ''})` : '',
             result.voiceChannelId ? `\n**Voice:** <#${result.voiceChannelId}>` : '',
             '',
             'You can re-run `/setup` any time to change the layout.',
@@ -372,6 +382,16 @@ export function startBot({ dbPath, token, rootConfigPath, postChannelId, alertCh
         for (const [guildId, guild] of client.guilds.cache) {
           const cfg = readGuildConfig(getRootConfig(), guildId);
           if (!cfg) continue; // not set up yet
+          if (!cfg.setupComplete) {
+            // The bot's been invited but /setup never finished. Log once per
+            // missing-config to help the operator notice, then skip.
+            log.warn(`[bot] guild ${guild.name} (${guildId}) is invited but /setup incomplete; skipping calls until admin runs /setup`);
+            continue;
+          }
+          if (!cfg.textChannels || cfg.textChannels.length === 0) {
+            log.warn(`[bot] guild ${guild.name} (${guildId}) has setupComplete=true but no textChannels; re-run /setup`);
+            continue;
+          }
           const channelId = routeCallToChannel(call, cfg);
           if (!channelId) continue;
           const channel = await client.channels.fetch(channelId).catch(() => null);

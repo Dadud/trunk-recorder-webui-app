@@ -1,0 +1,18 @@
+services:
+  qwen3-asr:
+    build:
+      context: .
+      dockerfile: qwen3.Dockerfile
+    image: qwen3-asr:0.1
+    container_name: qwen3-asr
+    restart: unless-stopped
+    runtime: nvidia  # Unraid 6.12+ supports nvidia runtime; otherwise use --gpus all
+    ports:
+      - "8080:8080"
+    volumes:
+      # Operator must ensure the model dir on the host has both:
+      #   Qwen3-ASR-1.7B.Q4_K_M.gguf
+      #   mmproj-Qwen3-ASR-1.7B-Q8_0.gguf
+      - /mnt/user/appdata/qwen3-asr/models-gguf:/work/models-gguf:ro
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
