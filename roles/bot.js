@@ -468,41 +468,97 @@ export function startBot({ dbPath, token, rootConfigPath, postChannelId, alertCh
   //   1. A channel named "scanner-calls" (single layout convention)
   //   2. A channel with "scanner" in the name (any layout, but not notable)
   //   3. A channel whose topic mentions scanner
-  async function autoBootstrapChannel(guild) {
-    try {
-      // 1. Ideal: a #scanner-calls text channel (the single-layout convention).
-      //    This is where ALL scanner traffic should land.
-      let ch = guild.channels.cache.find(c => c.type === ChannelType.GuildText && c.name === 'scanner-calls');
-      if (ch) return ch;
+  // Map of channel name (kebab-case) to talkgroup ID.
+  // Must match planChannels() in lib/setup.js so the routing and the
+  // wizard produce the same config from the same Discord state.
+  const TALKGROUP_BY_NAME = {
+    'wood-fire': 1, 'wood-ems': 2, 'wood-so': 3,
+    'clark-so': 5, 'clark-fire': 6, 'clark-pd-ems': 7,
+    'jack-so': 8, 'jack-fire': 9, 'main-dispatch': 10,
+  };
 
-      // 2. Any other non-notable scanner-named text channel.
-      ch = guild.channels.cache.find(c =>
-        c.type === ChannelType.GuildText
-        && /scanner/i.test(c.name)
-        && !/notable/i.test(c.name)
-        && !/alert/i.test(c.name)
-      );
-      if (ch) return ch;
+  // Derive the per-guild config from the actual Discord server state.
+  // Replaces /setup when the operator already has the right channels —
+  // the bot can read the structure that exists rather than insisting on
+  // a wizard. Returns null only if the server has no scanner channels
+  // at all and we couldn't create one.
+  async function deriveGuildConfig(guild) {
+    // Find the Scanner category (preferred) or fall back to no category
+    const category = guild.channels.cache.find(c =>
+      c.type === ChannelType.GuildCategory && /scanner/i.test(c.name)
+    );
 
-      // 3. Nothing suitable. Create #scanner-calls ourselves. The bot
-      //    needs the Manage Channels permission to do this; most scanner
-      //    bots are granted it. Falls through to creating it.
+    // Find the Scanner role
+    const role = guild.roles.cache.find(r => r.name === 'Scanner');
+
+    // Enumerate text channels in the scanner category (or all text channels if no category)
+    const inScope = guild.channels.cache.filter(c =>
+      c.type === ChannelType.GuildText && (!category || c.parentId === category.id)
+    );
+
+    // Find talkgroup channels by name (kebab-case → ID)
+    const talkgroupChans = [];
+    let catchall = null;
+    let notable = null;
+    for (const ch of inScope.values()) {
+      if (ch.name === 'scanner-notable') { notable = ch; continue; }
+      if (ch.name === 'scanner-calls') { catchall = ch; continue; }
+      if (TALKGROUP_BY_NAME[ch.name] != null) {
+        talkgroupChans.push({ name: ch.name, id: ch.id, kind: 'talkgroup', talkgroup: TALKGROUP_BY_NAME[ch.name] });
+      }
+    }
+    talkgroupChans.sort((a, b) => a.talkgroup - b.talkgroup);
+
+    // If we have 3+ talkgroup channels, use the multi layout (one per talkgroup).
+    // Otherwise, use a single catchall channel — create #scanner-calls if needed.
+    if (talkgroupChans.length >= 3) {
+      return {
+        setupComplete: true,
+        layout: 'multi',
+        visibility: role ? 'private' : 'public',
+        notable: !!notable,
+        voice: false,
+        categoryId: category?.id || null,
+        roleId: role?.id || null,
+        notableChannelId: notable?.id || null,
+        textChannels: talkgroupChans,
+        autoBootstrapped: true,
+      };
+    }
+
+    // No per-talkgroup structure. Find or create a single catchall channel.
+    if (!catchall) {
+      // Look for a generic scanner-named text channel outside the rules
+      catchall = inScope.find(c => /scanner/i.test(c.name) && !/notable/i.test(c.name));
+    }
+    if (!catchall) {
       try {
-        ch = await guild.channels.create({
+        catchall = await guild.channels.create({
           name: 'scanner-calls',
           type: ChannelType.GuildText,
+          parent: category?.id || null,
           topic: 'All scanner calls (auto-created by the bot).',
           reason: 'Scanner bot auto-bootstrap: no #scanner-calls channel existed',
         });
-        log.info(`[bot] auto-created #scanner-calls in ${guild.name} (id ${ch.id})`);
-        return ch;
+        log.info(`[bot] auto-created #scanner-calls in ${guild.name} (id ${catchall.id})`);
       } catch (err) {
         log.warn(`[bot] could not auto-create #scanner-calls in ${guild.name}: ${err.message}`);
+        return null;
       }
-    } catch (err) {
-      log.warn(`[bot] autoBootstrap failed for ${guild.name}: ${err.message}`);
     }
-    return null;
+    return {
+      setupComplete: true,
+      layout: 'single',
+      visibility: role ? 'private' : 'public',
+      notable: !!notable,
+      voice: false,
+      categoryId: category?.id || null,
+      roleId: role?.id || null,
+      notableChannelId: notable?.id || null,
+      textChannels: [{ name: catchall.name, id: catchall.id, kind: 'all' }],
+      postChannelId: catchall.id,
+      autoBootstrapped: true,
+    };
   }
 
   // Run auto-bootstrap at startup for any guild that looks misconfigured.
@@ -512,9 +568,16 @@ export function startBot({ dbPath, token, rootConfigPath, postChannelId, alertCh
       let cfg = readGuildConfig(getRootConfig(), guild.id);
       if (!cfg) continue;
       const hasCallChannel = cfg.textChannels?.some(c => c.kind === 'all');
-      const misconfigured = cfg.setupComplete && cfg.layout === 'multi' && hasCallChannel;
+      const serverTalkgroupCount = guild.channels.cache.filter(c =>
+        c.type === ChannelType.GuildText
+        && c.parent?.name === '📡 Scanner'
+        && /^(wood-fire|wood-ems|wood-so|clark-so|clark-fire|clark-pd-ems|jack-so|jack-fire|main-dispatch)$/i.test(c.name)
+      ).size;
+      const misconfigured =
+        (cfg.setupComplete && cfg.layout === 'multi' && hasCallChannel && !cfg.textChannels?.some(c => c.kind === 'talkgroup')) ||
+        (cfg.setupComplete && cfg.layout === 'single' && serverTalkgroupCount >= 3);
       if (!misconfigured) continue;
-      log.info(`[bot] startup: guild ${guild.name} has bad bootstrap (layout=multi with single channel); re-bootstrapping`);
+      log.info(`[bot] startup: guild ${guild.name} has bad config (layout=${cfg.layout}, ${serverTalkgroupCount} talkgroup channels in Discord); re-deriving`);
       cfg = { ...cfg, setupComplete: false };
       // Force the post loop to re-bootstrap on next tick
       saveRootConfig(writeGuildConfig(getRootConfig(), guild.id, cfg));
@@ -549,34 +612,33 @@ export function startBot({ dbPath, token, rootConfigPath, postChannelId, alertCh
           // case where the operator already had #scanner-notable but no
           // #scanner-calls — we should have created one instead of dumping
           // all traffic into notable.
+          // Detect a bad auto-bootstrap: layout='multi' with only a catchall
+          // channel, OR layout='single' while the Discord server actually
+          // has 3+ talkgroup channels (the user built the multi structure
+          // but the config is stuck on single). Either way, re-derive.
           const hasCallChannel = cfg.textChannels?.some(c => c.kind === 'all');
-          const misconfigured = cfg.setupComplete && cfg.layout === 'multi' && hasCallChannel;
+          const hasTalkgroupChannels = cfg.textChannels?.some(c => c.kind === 'talkgroup');
+          const serverTalkgroupCount = guild.channels.cache.filter(c =>
+            c.type === ChannelType.GuildText
+            && c.parent?.name === '📡 Scanner'
+            && /^(wood-fire|wood-ems|wood-so|clark-so|clark-fire|clark-pd-ems|jack-so|jack-fire|main-dispatch)$/i.test(c.name)
+          ).size;
+          const misconfigured =
+            (cfg.setupComplete && cfg.layout === 'multi' && hasCallChannel && !hasTalkgroupChannels) ||
+            (cfg.setupComplete && cfg.layout === 'single' && serverTalkgroupCount >= 3);
           if (misconfigured) {
-            log.info(`[bot] guild ${guild.name}: detected misconfigured auto-bootstrap (layout=multi with single channel); re-bootstrapping`);
+            log.info(`[bot] guild ${guild.name}: detected misconfigured config (layout=${cfg.layout}, ${serverTalkgroupCount} talkgroup channels in Discord); re-deriving`);
             cfg = { ...cfg, setupComplete: false };
           }
           if (!cfg.setupComplete) {
             // Auto-bootstrap: find an existing scanner channel in the guild
             // and use it. This is the "it should just work" path — don't
             // make the operator run /setup if there's an obvious place to post.
-            const auto = await autoBootstrapChannel(guild);
-            if (auto) {
-              // Find a separate notable channel if one exists (for keyword alerts).
-              const notable = guild.channels.cache.find(c =>
-                c.type === ChannelType.GuildText && /notable/i.test(c.name)
-              );
-              cfg = {
-                ...cfg,
-                setupComplete: true,
-                layout: 'single',  // single-channel; the calls channel is the destination for all traffic
-                textChannels: [{ name: auto.name, id: auto.id, kind: 'all' }],
-                postChannelId: auto.id,
-                notableChannelId: notable?.id || null,
-                notable: !!notable,  // only true if we found a separate notable channel
-                autoBootstrapped: true,
-              };
+            const derived = await deriveGuildConfig(guild);
+            if (derived) {
+              cfg = { ...cfg, ...derived };
               saveRootConfig(writeGuildConfig(getRootConfig(), guildId, cfg));
-              log.info(`[bot] auto-bootstrapped guild ${guild.name}: calls=#${auto.name}${notable ? ` notable=#${notable.name}` : ' (no notable channel)'}`);
+              log.info(`[bot] auto-bootstrapped guild ${guild.name}: layout=${derived.layout} (${derived.textChannels.length} channels${derived.notableChannelId ? `, notable=#${guild.channels.cache.get(derived.notableChannelId)?.name || '?'}` : ''})`);
             } else {
               log.warn(`[bot] guild ${guild.name} (${guildId}) has no scanner channel; run /setup or create a #scanner-calls channel.`);
               continue;
