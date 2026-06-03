@@ -1,0 +1,31 @@
+{
+  "ver": 2,
+  "sources": [
+    {
+      "center": 154000000,
+      "rate": 9000000,
+      "error": 0,
+      "gain": 40,
+      "agc": false,
+      "analogRecorders": 8,
+      "digitalRecorders": 0,
+      "driver": "osmosdr",
+      "device": "soapy,driver=sdrplay,serial=24050C8360"
+    }
+  ],
+  "systems": [
+    {
+      "shortName": "pittsville",
+      "systemLabel": "Pittsville Conventional",
+      "type": "conventional",
+      "channelFile": "/home/dadud/recorder/channel.csv",
+      "squelch": -60,
+      "callLog": true,
+      "audioArchive": true,
+      "minCallDuration": 1
+    }
+  ],
+  "captureDir": "/home/dadud/recordings",
+  "captureFormat": "wav",
+  "callTimeout": 5
+}
