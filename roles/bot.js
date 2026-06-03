@@ -1,7 +1,7 @@
 // Discord bot role: post call embeds, optional voice channel, /setup wizard,
 // /recent, /search, keyword alerts, multi-channel routing.
 import { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, PermissionFlagsBits } from 'discord.js';
-import { getDb, getCallsSince, getCallById, matchKeywords, recordPosted, listKeywords } from '../lib/db.js';
+import { getDb, getCallsSince, getCallById, matchKeywords, recordPosted, listKeywords, addKeyword } from '../lib/db.js';
 import { DEFAULT_KEYWORDS, shouldPageKeyword } from '../lib/keywords-defaults.js';
 import {
   getWizardState, setWizardState, clearWizardState,
