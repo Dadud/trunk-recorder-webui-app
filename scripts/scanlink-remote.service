@@ -1,0 +1,21 @@
+[Unit]
+Description=Scanlink Remote Watcher (SDRBOX → Gateway)
+Documentation=https://github.com/Dadud/trunk-recorder-webui-app
+After=trunk-recorder.service
+Wants=trunk-recorder.service
+
+[Service]
+Type=simple
+User=dadud
+Group=dadud
+WorkingDirectory=/home/dadud/scanlink
+EnvironmentFile=/home/dadud/scanlink/.env
+ExecStart=/usr/bin/node /home/dadud/scanlink/app/remote-watcher.js
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=scanlink-remote
+
+[Install]
+WantedBy=multi-user.target

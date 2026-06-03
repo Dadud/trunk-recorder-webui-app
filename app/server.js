@@ -6,10 +6,16 @@ try {
   const dotenv = await import('dotenv');
   dotenv.config();
 } catch {}
+
+// busboy is used by /api/calls (multipart ingest) and /tones/import (CSV upload).
+// Import lazily to keep cold-start fast.
+import { createRequire } from 'module';
+const requireESM = createRequire(import.meta.url);
+const Busboy = requireESM('busboy');
 import path from 'path';
 import { execSync } from 'child_process';
 import { fileURLToPath } from 'url';
-import { getDb, getRecentCalls, getCallById, searchCalls, getStats, addKeyword, removeKeyword, listKeywords, listToneList, removeToneListEntry, addToneListEntry, importToneListCsv } from '../lib/db.js';
+import { getDb, getRecentCalls, getCallById, searchCalls, getStats, addKeyword, removeKeyword, listKeywords, listToneList, removeToneListEntry, addToneListEntry, importToneListCsv, upsertCall } from '../lib/db.js';
 import { startWatcher } from '../roles/watcher.js';
 import { startTranscriber } from '../roles/transcriber.js';
 import { startBot } from '../roles/bot.js';
@@ -297,6 +303,69 @@ app.get('/configurator/add-system/:kind', (req, res) => { const config = readCon
 app.get('/configurator/remove-system/:index', (req, res) => { const config = readConfig(); const index = Number(req.params.index); if (Array.isArray(config.systems) && config.systems.length > 1) { config.systems.splice(index, 1); writeConfig(config); } res.redirect('/configuration'); });
 
 // ─── Calls page ────────────────────────────────────────────────────────────────
+// ─── Ingest endpoint (POST /api/calls) ──────────────────────────────────────
+// Accepts multipart/form-data with fields:
+//   - sidecar: JSON-encoded call record (from buildCallFromJson)
+//   - audio: optional .wav/.m4a file (the audio for this call)
+// Saves the audio to a local dir (configurable) and inserts/updates the call row.
+import { mkdir, writeFile } from 'fs/promises';
+import path_posix from 'path';
+import { existsSync } from 'fs';
+
+const INGEST_AUDIO_DIR = path.join(dataDir, 'audio');
+
+app.post('/api/calls', (req, res) => {
+  const busboy = Busboy({ headers: req.headers });
+  let sidecar = null;
+  const audioBuffers = [];
+  let audioFilename = null;
+  let audioMime = null;
+  busboy.on('field', (name, value) => {
+    if (name === 'sidecar') {
+      try { sidecar = JSON.parse(value); } catch { /* ignore */ }
+    }
+  });
+  busboy.on('file', (name, file, info) => {
+    if (name === 'audio') {
+      audioFilename = info.filename;
+      audioMime = info.mimeType;
+      file.on('data', chunk => audioBuffers.push(chunk));
+    } else {
+      file.resume(); // discard
+    }
+  });
+  busboy.on('finish', async () => {
+    try {
+      if (!sidecar) return res.status(400).json({ error: 'missing sidecar field' });
+      // Sanity-check the call shape
+      if (!sidecar.short_name || !sidecar.start_time || !sidecar.call_num) {
+        return res.status(400).json({ error: 'sidecar missing required fields' });
+      }
+      // Save audio to disk if present
+      if (audioBuffers.length > 0) {
+        if (!existsSync(INGEST_AUDIO_DIR)) await mkdir(INGEST_AUDIO_DIR, { recursive: true });
+        const buf = Buffer.concat(audioBuffers);
+        const ext = path_posix.extname(audioFilename || '.wav') || '.wav';
+        const safeShort = String(sidecar.short_name).replace(/[^a-z0-9_-]/gi, '_');
+        const localName = `${safeShort}-${sidecar.start_time}-${sidecar.call_num}${ext}`;
+        const localPath = path.join(INGEST_AUDIO_DIR, localName);
+        await writeFile(localPath, buf);
+        sidecar.audio_path = localPath;
+        sidecar.audio_size = buf.length;
+        sidecar.audio_format = ext.replace(/^\./, '');
+      }
+      // Insert/update
+      const db = getDb(dbPath);
+      const id = upsertCall(db, sidecar);
+      res.json({ ok: true, id, audio: audioBuffers.length > 0 ? { saved: true, size: Buffer.concat(audioBuffers).length } : { saved: false } });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+  busboy.on('error', err => res.status(400).json({ error: err.message }));
+  req.pipe(busboy);
+});
+
 app.get('/calls', (req, res) => {
   const db = getDb(dbPath);
   const q = String(req.query.q || '').trim();
@@ -442,7 +511,6 @@ app.get('/tones/remove/:id', (req, res) => {
 });
 
 app.post('/tones/import', (req, res) => {
-  const Busboy = require('busboy');
   const busboy = Busboy({ headers: req.headers });
   let csvText = null;
   busboy.on('file', (fieldname, file) => {
@@ -471,7 +539,7 @@ function startRoles() {
 
   if (sc.watcher?.enabled && sc.watcher?.recordingsDir) {
     try {
-      roleHandles.watcher = startWatcher({ recordingsDir: sc.watcher.recordingsDir, dbPath, log: console });
+      roleHandles.watcher = startWatcher({ recordingsDir: sc.watcher.recordingsDir, dbPath, pushTo: sc.watcher.pushTo, log: console });
       roleStats.watcher = { started: new Date().toISOString() };
     } catch (err) { console.error(`[watcher] failed to start: ${err.message}`); }
   } else {

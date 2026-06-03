@@ -22,6 +22,11 @@ async function transcribeOne(call, qwenUrl) {
   const res = await fetch(url, { method: 'POST', body: form });
   if (!res.ok) {
     const text = await res.text();
+    // Treat 4xx errors as permanent failures (the call itself is bad) and skip
+    // them. 5xx is a transient server problem, mark for retry by throwing.
+    if (res.status >= 400 && res.status < 500) {
+      return { skipped: true, reason: `qwen ${res.status}: ${text.slice(0, 100)}` };
+    }
     throw new Error(`Qwen HTTP ${res.status}: ${text.slice(0, 200)}`);
   }
   const data = await res.json();
