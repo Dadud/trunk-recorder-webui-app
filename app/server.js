@@ -1,5 +1,11 @@
 import express from 'express';
 import fs from 'fs';
+// Load .env if present so DISCORD_TOKEN, GUILD_ID, etc. are available
+// without needing them in the shell environment.
+try {
+  const dotenv = await import('dotenv');
+  dotenv.config();
+} catch {}
 import path from 'path';
 import { execSync } from 'child_process';
 import { fileURLToPath } from 'url';
@@ -354,7 +360,7 @@ app.post('/discord', (req, res) => {
   config.scanner = {
     watcher: { enabled: b.watcher_enabled === 'true', recordingsDir: b.watcher_recordingsDir || '' },
     transcriber: { enabled: b.transcriber_enabled === 'true', qwenUrl: b.transcriber_qwenUrl || '' },
-    bot: { enabled: b.bot_enabled === 'true', postChannelId: b.bot_postChannelId || '', alertChannelId: b.bot_alertChannelId || '', voiceChannelId: b.bot_voiceChannelId || '' },
+    bot: { enabled: b.bot_enabled === 'true', postChannelId: b.bot_postChannelId || '', alertChannelId: b.bot_alertChannelId || '', voiceChannelId: b.bot_voiceChannelId || '', requireAudio: b.bot_requireAudio !== 'false' },
   };
   writeConfig(config);
   stopRoles();

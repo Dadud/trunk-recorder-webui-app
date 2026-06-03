@@ -21,9 +21,10 @@ export function startToneDetector({ dbPath, intervalMs = 5000, log = console }) 
       const pending = db.prepare(`
         SELECT c.* FROM calls c
         LEFT JOIN tone_records tr ON tr.call_id = c.id
+        LEFT JOIN transcripts t ON t.call_id = c.id
         WHERE tr.id IS NULL
           AND c.audio_path IS NOT NULL
-          AND (c.transcript_id IS NOT NULL OR c.created_at < strftime('%s', 'now') - 60)
+          AND (t.id IS NOT NULL OR c.created_at < strftime('%s', 'now') - 60)
         ORDER BY c.recorded_at ASC LIMIT 1
       `).all();
       if (pending.length === 0) return;

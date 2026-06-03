@@ -92,7 +92,7 @@ function routeCallToChannel(call, guildCfg) {
   return guildCfg.postChannelId || null;
 }
 
-export function startBot({ dbPath, token, rootConfigPath, postChannelId, alertChannelId, voiceChannelId, pollIntervalMs = 3000, log = console, writeConfig }) {
+export function startBot({ dbPath, token, rootConfigPath, postChannelId, alertChannelId, voiceChannelId, pollIntervalMs = 3000, requireAudio = true, log = console, writeConfig }) {
   if (!token) {
     log.warn('[bot] DISCORD_TOKEN not set, bot disabled');
     return { stop: () => {} };
@@ -131,7 +131,10 @@ export function startBot({ dbPath, token, rootConfigPath, postChannelId, alertCh
     } catch (err) { log.warn(`[bot] failed to persist config: ${err.message}`); }
   }
 
-  client.once('ready', async () => {
+  // discord.js v14 uses 'ready'; v15 renames to 'clientReady'. We're on v14.26.4
+  // so 'ready' is correct. Switch the literal when bumping the lib.
+  const onReady = 'ready';
+  client.once(onReady, async () => {
     log.info(`[bot] logged in as ${client.user.tag}`);
     // Register slash commands globally (Discord caches for up to 1h, but guild commands are instant)
     // For dev we'll use guild-scoped commands for the first connected guild.
@@ -357,6 +360,13 @@ export function startBot({ dbPath, token, rootConfigPath, postChannelId, alertCh
       const newCalls = getCallsSince(db, lastSeenId, 10);
       for (const call of newCalls) {
         if (call.id <= lastSeenId) continue;
+        // Skip calls that have no audio file (text-only calls aren't useful to post).
+        // Can be disabled with requireAudio=false for setups where audio is suppressed.
+        if (requireAudio && !call.audio_path) {
+          // Still advance lastSeenId so we don't loop on the same row forever
+          lastSeenId = Math.max(lastSeenId, call.id);
+          continue;
+        }
 
         // For each guild we're in, post if routing matches
         for (const [guildId, guild] of client.guilds.cache) {

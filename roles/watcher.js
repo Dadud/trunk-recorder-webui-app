@@ -9,7 +9,10 @@ export function startWatcher({ recordingsDir, dbPath, log = console }) {
   log.info(`[watcher] starting on ${recordingsDir}`);
 
   const watcher = chokidar.watch(path.join(recordingsDir, '**/*.json'), {
-    ignoreInitial: false,
+    // ignoreInitial: true — only ingest new files added after the watcher starts.
+    // This avoids backfilling 379 historical calls on every bot restart. Set to
+    // false if you want full re-ingestion (e.g. after wiping the SQLite db).
+    ignoreInitial: true,
     awaitWriteFinish: { stabilityThreshold: 500, pollInterval: 100 },
     persistent: true,
   });
