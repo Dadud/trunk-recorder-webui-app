@@ -3,19 +3,27 @@ import fs from 'fs';
 import path from 'path';
 import { execSync } from 'child_process';
 import { fileURLToPath } from 'url';
+import { getDb, getRecentCalls, getCallById, searchCalls, getStats, addKeyword, removeKeyword, listKeywords } from '../lib/db.js';
+import { startWatcher } from '../roles/watcher.js';
+import { startTranscriber } from '../roles/transcriber.js';
+import { startBot } from '../roles/bot.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const root = path.resolve(__dirname, '..');
 const configDir = path.join(root, 'config');
 const configPath = path.join(configDir, 'config.json');
+const dataDir = path.join(root, 'data');
+const dbPath = path.join(dataDir, 'scanner.db');
 const app = express();
 
 app.use(express.urlencoded({ extended: true }));
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
 
 // In-memory status store for trunk-recorder status
 let trStatus = null;
+const roleHandles = {};
+const roleStats = { watcher: null, transcriber: null, bot: null };
 
 function ensureConfig() {
   if (!fs.existsSync(configDir)) fs.mkdirSync(configDir, { recursive: true });
@@ -86,7 +94,7 @@ function layout(title, body) {
   .badge { display:inline-block; padding:3px 8px; border-radius:999px; font-size:11px; font-weight:700; background:#ecfdf3; color:#027a48; }
   pre { white-space: pre-wrap; word-break: break-word; background: #0b1020; color: #e5e7eb; padding: 14px; border-radius: 12px; overflow: auto; }
   h1,h2,h3 { margin-top: 0; } .footer-link { margin-top: 12px; }
-  </style></head><body><div class="wrap"><div class="header"><div class="brand">Trunk Recorder Web UI</div><div class="sub">Tiny, friendly setup and runtime management for Trunk Recorder</div><div class="nav"><a href="/">Home</a><a href="/setup">Setup</a><a href="/configuration">Configuration</a><a href="/runtime">Runtime</a><a href="/files">Talkgroups & Tags</a></div></div>${body}</div></body></html>`;
+  </style></head><body><div class="wrap"><div class="header"><div class="brand">Trunk Recorder Web UI</div><div class="sub">Tiny, friendly setup and runtime management for Trunk Recorder</div><div class="nav"><a href="/">Home</a><a href="/setup">Setup</a><a href="/configuration">Configuration</a><a href="/calls">Calls</a><a href="/discord">Discord</a><a href="/keywords">Keywords</a><a href="/runtime">Runtime</a><a href="/files">Talkgroups & Tags</a></div></div>${body}</div></body></html>`;
 }
 
 // ─── API Routes ───────────────────────────────────────────────────────────────
@@ -281,5 +289,151 @@ app.get('/configurator/remove-source/:index', (req, res) => { const config = rea
 app.get('/configurator/add-system/:kind', (req, res) => { const config = readConfig(); if (!Array.isArray(config.systems)) config.systems = []; config.systems.push(systemTemplate(req.params.kind)); writeConfig(config); res.redirect('/configuration'); });
 app.get('/configurator/remove-system/:index', (req, res) => { const config = readConfig(); const index = Number(req.params.index); if (Array.isArray(config.systems) && config.systems.length > 1) { config.systems.splice(index, 1); writeConfig(config); } res.redirect('/configuration'); });
 
+// ─── Calls page ────────────────────────────────────────────────────────────────
+app.get('/calls', (req, res) => {
+  const db = getDb(dbPath);
+  const q = String(req.query.q || '').trim();
+  const limit = Math.min(Number(req.query.limit) || 50, 200);
+  const calls = q ? searchCalls(db, q, limit) : getRecentCalls(db, limit);
+  const stats = getStats(db);
+  res.send(layout('Calls', `
+    <div class="card"><h1>Calls</h1><p class="muted">Recent calls ingested from the recordings directory. ${stats.total} total, ${stats.transcribed} transcribed, ${stats.last24h} in last 24h.</p>
+    <form method="get" action="/calls"><div class="row"><div style="grid-column: span 3;"><label>Search transcripts, talkgroups</label><input name="q" value="${esc(q)}" placeholder="fire, dispatch, 154.160" /></div><div><label>Limit</label><input name="limit" value="${limit}" /></div></div><div class="actions"><button type="submit">Search</button><a class="btn light" href="/calls">Clear</a></div></form></div>
+    <div class="card"><table style="width:100%; border-collapse: collapse;"><thead><tr style="text-align:left; border-bottom: 1px solid #eaecf0;"><th>ID</th><th>Time</th><th>Channel</th><th>Talkgroup</th><th>Freq</th><th>Length</th><th>Audio</th><th>Transcript</th></tr></thead><tbody>${calls.map(c => `<tr style="border-bottom: 1px solid #f2f4f7;"><td><a href="/calls/${c.id}">${c.id}</a></td><td>${esc(new Date(c.recorded_at).toLocaleString())}</td><td>${esc(c.short_name)}</td><td>${esc(c.talkgroup_tag || '?')}</td><td>${(c.freq/1e6).toFixed(3)}</td><td>${c.call_length?.toFixed(1)}s</td><td>${c.audio_path ? '🎵' : '—'}</td><td>${esc((c.transcript_text || '').slice(0, 80))}${(c.transcript_text || '').length > 80 ? '…' : ''}</td></tr>`).join('')}</tbody></table></div>
+  `));
+});
+
+app.get('/calls/:id', (req, res) => {
+  const db = getDb(dbPath);
+  const call = getCallById(db, Number(req.params.id));
+  if (!call) return res.status(404).send(layout('Not found', '<div class="card"><h1>Not found</h1></div>'));
+  res.send(layout(`Call #${call.id}`, `
+    <div class="card"><h1>Call #${call.id} — ${esc(call.talkgroup_tag || 'Unknown')}</h1>
+    <div class="row"><div><strong>Time</strong><br>${esc(new Date(call.recorded_at).toLocaleString())}</div><div><strong>Frequency</strong><br>${(call.freq/1e6).toFixed(4)} MHz</div><div><strong>Length</strong><br>${call.call_length?.toFixed(2)}s</div><div><strong>Channel</strong><br>${esc(call.short_name)}</div><div><strong>Talkgroup</strong><br>${esc(call.talkgroup_description || '?')}</div><div><strong>Group</strong><br>${esc(call.talkgroup_group || '?')}</div></div>
+    ${call.audio_path ? `<div class="note">Audio file: <code>${esc(call.audio_path)}</code> (${(call.audio_size/1024).toFixed(1)} KB, ${esc(call.audio_format)})</div>` : '<div class="error">No audio file for this call.</div>'}
+    </div>
+    <div class="card"><h2>Transcript</h2>${call.transcript_text ? `<pre>${esc(call.transcript_text)}</pre>` : '<p class="muted">_(pending or unavailable)_</p>'}</div>
+    <div class="card"><h2>Sidecar JSON</h2><pre>${esc(call.sidecar_json || '{}')}</pre></div>
+    <p><a class="btn" href="/calls">Back to calls</a></p>
+  `));
+});
+
+// ─── Discord config page ───────────────────────────────────────────────────────
+app.get('/discord', (req, res) => {
+  const config = readConfig();
+  const sc = config.scanner || { watcher: {}, transcriber: {}, bot: {} };
+  const stats = getStats(getDb(dbPath));
+  res.send(layout('Discord & Roles', `
+    <div class="card"><h1>Discord & Scanner Roles</h1><p class="muted">Configure the three scanner roles. Store stats: ${stats.total} calls, ${stats.transcribed} transcribed, ${stats.posted} posted to Discord.</p></div>
+    <form method="post" action="/discord">
+      <div class="card"><h2>Watcher role</h2><p class="muted">Watches a directory for new trunk-recorder output and ingests into the local SQLite store.</p>
+        <div class="row"><div><label>Enabled</label><select name="watcher_enabled"><option value="true" ${sc.watcher?.enabled ? 'selected' : ''}>true</option><option value="false" ${!sc.watcher?.enabled ? 'selected' : ''}>false</option></select></div>
+        <div style="grid-column: span 2;"><label>Recordings directory</label><input name="watcher_recordingsDir" value="${esc(sc.watcher?.recordingsDir || '')}" placeholder="/mnt/user/recordings or /path/to/recordings" /></div></div>
+      </div>
+      <div class="card"><h2>Transcriber role</h2><p class="muted">Polls the store, calls Qwen3-ASR, writes transcripts back.</p>
+        <div class="row"><div><label>Enabled</label><select name="transcriber_enabled"><option value="true" ${sc.transcriber?.enabled ? 'selected' : ''}>true</option><option value="false" ${!sc.transcriber?.enabled ? 'selected' : ''}>false</option></select></div>
+        <div style="grid-column: span 2;"><label>Qwen3 URL</label><input name="transcriber_qwenUrl" value="${esc(sc.transcriber?.qwenUrl || '')}" placeholder="http://192.168.1.4:8080" /></div></div>
+      </div>
+      <div class="card"><h2>Bot role</h2><p class="muted">Discord bot. Token comes from environment (<code>DISCORD_TOKEN</code>); channel IDs are configured here. Voice channel is optional.</p>
+        <div class="row"><div><label>Enabled</label><select name="bot_enabled"><option value="true" ${sc.bot?.enabled ? 'selected' : ''}>true</option><option value="false" ${!sc.bot?.enabled ? 'selected' : ''}>false</option></select></div></div>
+        <div class="row"><div><label>Post channel ID</label><input name="bot_postChannelId" value="${esc(sc.bot?.postChannelId || '')}" placeholder="1234567890" /></div>
+        <div><label>Alert channel ID</label><input name="bot_alertChannelId" value="${esc(sc.bot?.alertChannelId || '')}" placeholder="1234567890" /></div>
+        <div><label>Voice channel ID</label><input name="bot_voiceChannelId" value="${esc(sc.bot?.voiceChannelId || '')}" placeholder="1234567890 (optional)" /></div></div>
+        <div class="note">Voice channel requires the bot to have <code>Connect</code> and <code>Speak</code> permissions on that channel. If unset, the 🔊 button replies with the audio file path instead of joining voice.</div>
+      </div>
+      <div class="actions"><button type="submit">Save & restart roles</button><a class="btn light" href="/runtime">Runtime</a></div>
+    </form>
+    <div class="card"><h2>Role status</h2><pre>${esc(JSON.stringify({ watcher: roleStats.watcher, transcriber: roleStats.transcriber, bot: roleStats.bot, store_stats: stats }, null, 2))}</pre></div>
+  `));
+});
+
+app.post('/discord', (req, res) => {
+  const b = req.body;
+  const config = readConfig();
+  config.scanner = {
+    watcher: { enabled: b.watcher_enabled === 'true', recordingsDir: b.watcher_recordingsDir || '' },
+    transcriber: { enabled: b.transcriber_enabled === 'true', qwenUrl: b.transcriber_qwenUrl || '' },
+    bot: { enabled: b.bot_enabled === 'true', postChannelId: b.bot_postChannelId || '', alertChannelId: b.bot_alertChannelId || '', voiceChannelId: b.bot_voiceChannelId || '' },
+  };
+  writeConfig(config);
+  stopRoles();
+  startRoles();
+  res.redirect('/discord');
+});
+
+// ─── Keywords page ─────────────────────────────────────────────────────────────
+app.get('/keywords', (req, res) => {
+  const db = getDb(dbPath);
+  const keywords = listKeywords(db);
+  res.send(layout('Keywords', `
+    <div class="card"><h1>Keyword Alerts</h1><p class="muted">Match against transcript text. Matches ping the alert channel with a role mention (if set).</p>
+    <form method="post" action="/keywords/add"><div class="row"><div><label>Pattern (case-insensitive substring)</label><input name="pattern" required /></div><div><label>Role ID (optional, pings on match)</label><input name="role_id" placeholder="1234567890" /></div></div><div class="actions"><button type="submit">Add keyword</button></div></form></div>
+    <div class="card"><h2>Current keywords</h2>${keywords.length === 0 ? '<p class="muted">No keywords configured.</p>' : `<table style="width:100%; border-collapse: collapse;"><thead><tr style="text-align:left; border-bottom: 1px solid #eaecf0;"><th>Pattern</th><th>Role</th><th>Enabled</th><th></th></tr></thead><tbody>${keywords.map(k => `<tr style="border-bottom: 1px solid #f2f4f7;"><td><code>${esc(k.pattern)}</code></td><td>${k.role_id ? `<code>${esc(k.role_id)}</code>` : '—'}</td><td>${k.enabled ? '✅' : '❌'}</td><td><a class="btn light" href="/keywords/remove/${k.id}">Remove</a></td></tr>`).join('')}</tbody></table>`}</div>
+  `));
+});
+
+app.post('/keywords/add', (req, res) => {
+  const db = getDb(dbPath);
+  addKeyword(db, req.body.pattern, null, req.body.role_id || null);
+  res.redirect('/keywords');
+});
+app.get('/keywords/remove/:id', (req, res) => {
+  const db = getDb(dbPath);
+  removeKeyword(db, Number(req.params.id));
+  res.redirect('/keywords');
+});
+
 const port = process.env.PORT || 8080;
 app.listen(port, () => console.log(`webui listening on http://0.0.0.0:${port}`));
+
+// ─── Scanner Roles (watcher / transcriber / bot) ──────────────────────────────
+function startRoles() {
+  const config = readConfig();
+  const sc = config.scanner || {};
+
+  if (sc.watcher?.enabled && sc.watcher?.recordingsDir) {
+    try {
+      roleHandles.watcher = startWatcher({ recordingsDir: sc.watcher.recordingsDir, dbPath, log: console });
+      roleStats.watcher = { started: new Date().toISOString() };
+    } catch (err) { console.error(`[watcher] failed to start: ${err.message}`); }
+  } else {
+    console.log('[watcher] disabled in config');
+  }
+
+  if (sc.transcriber?.enabled && sc.transcriber?.qwenUrl) {
+    try {
+      roleHandles.transcriber = startTranscriber({ dbPath, qwenUrl: sc.transcriber.qwenUrl, log: console });
+      roleStats.transcriber = { started: new Date().toISOString() };
+    } catch (err) { console.error(`[transcriber] failed to start: ${err.message}`); }
+  } else {
+    console.log('[transcriber] disabled in config');
+  }
+
+  if (sc.bot?.enabled && process.env.DISCORD_TOKEN) {
+    try {
+      roleHandles.bot = startBot({
+        dbPath,
+        token: process.env.DISCORD_TOKEN,
+        postChannelId: sc.bot.postChannelId,
+        alertChannelId: sc.bot.alertChannelId,
+        voiceChannelId: sc.bot.voiceChannelId,
+        log: console,
+      });
+      roleStats.bot = { started: new Date().toISOString() };
+    } catch (err) { console.error(`[bot] failed to start: ${err.message}`); }
+  } else {
+    console.log('[bot] disabled (no DISCORD_TOKEN or not enabled in config)');
+  }
+}
+
+function stopRoles() {
+  for (const [name, h] of Object.entries(roleHandles)) {
+    try { h?.stop?.(); } catch (err) { console.error(`[${name}] stop error: ${err.message}`); }
+  }
+  Object.keys(roleHandles).forEach(k => delete roleHandles[k]);
+}
+
+process.on('SIGTERM', () => { stopRoles(); process.exit(0); });
+process.on('SIGINT', () => { stopRoles(); process.exit(0); });
+
+startRoles();
