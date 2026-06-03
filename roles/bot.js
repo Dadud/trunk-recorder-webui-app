@@ -1,7 +1,7 @@
 // Discord bot role: post call embeds, optional voice channel, /setup wizard,
 // /recent, /search, keyword alerts, multi-channel routing.
 import { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, PermissionFlagsBits } from 'discord.js';
-import { getDb, getCallsSince, getCallById, matchKeywords, recordPosted, listKeywords, addKeyword } from '../lib/db.js';
+import { getDb, getCallsSince, getCallById, matchKeywords, recordPosted, listKeywords, addKeyword, getBotState, setBotState, wasPostedTo } from '../lib/db.js';
 import { DEFAULT_KEYWORDS, shouldPageKeyword } from '../lib/keywords-defaults.js';
 import {
   getWizardState, setWizardState, clearWizardState,
@@ -110,10 +110,27 @@ export function startBot({ dbPath, token, rootConfigPath, postChannelId, alertCh
     ],
   });
 
-  let lastSeenId = db.prepare('SELECT MAX(id) as m FROM posted_messages').get()?.m || 0;
+  // lastSeenId tracks the highest calls.id we've posted. Persisted to bot_state
+  // so restarts don't re-post everything. On first run, we backfill lastSeenId
+  // to the highest call id that has BOTH audio AND a setup-complete guild,
+  // so we skip the 558 historical text-only rows and start fresh from now.
+  let lastSeenId = getBotState(db, 'bot.lastSeenId', null);
+  if (lastSeenId === null) {
+    // No persisted state. Use the highest call id that has audio — everything
+    // before that has already been "settled" (either posted, skipped, or
+    // never going to have audio). We start from there so the first real call
+    // gets posted.
+    const audioMax = db.prepare(`SELECT MAX(id) as m FROM calls WHERE audio_path IS NOT NULL`).get();
+    lastSeenId = audioMax?.m || 0;
+    setBotState(db, 'bot.lastSeenId', lastSeenId);
+    log.info(`[bot] first run: lastSeenId initialized to ${lastSeenId} (highest call with audio)`);
+  }
   let totalPosted = 0;
   const alertCache = new Map();
   const notableCache = new Map();
+  // Channel fetch cache: avoid Discord rate limits on `client.channels.fetch`
+  const channelCache = new Map(); // id -> { channel, fetchedAt }
+  const CHANNEL_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
   // Per-guild setup completion status, read on guildCreate/post time
   function getRootConfig() {
@@ -452,6 +469,8 @@ export function startBot({ dbPath, token, rootConfigPath, postChannelId, alertCh
         if (requireAudio && !call.audio_path) {
           // Still advance lastSeenId so we don't loop on the same row forever
           lastSeenId = Math.max(lastSeenId, call.id);
+          setBotState(db, 'bot.lastSeenId', lastSeenId);
+          log.warn(`[bot] call #${call.id} (${call.talkgroup_tag}) has no audio; skipping (set bot.requireAudio=false to post text-only)`);
           continue;
         }
 
@@ -471,7 +490,21 @@ export function startBot({ dbPath, token, rootConfigPath, postChannelId, alertCh
           }
           const channelId = routeCallToChannel(call, cfg);
           if (!channelId) continue;
-          const channel = await client.channels.fetch(channelId).catch(() => null);
+          // Skip if we already posted this call to this channel
+          if (wasPostedTo(db, call.id, channelId)) {
+            log.info(`[bot] call #${call.id} already posted to channel ${channelId}; skipping`);
+            continue;
+          }
+          // Use cached channel object if fresh, else fetch
+          let channel = null;
+          const cached = channelCache.get(channelId);
+          if (cached && (Date.now() - cached.fetchedAt) < CHANNEL_CACHE_TTL_MS) {
+            channel = cached.channel;
+          }
+          if (!channel) {
+            channel = await client.channels.fetch(channelId).catch(() => null);
+            if (channel) channelCache.set(channelId, { channel, fetchedAt: Date.now() });
+          }
           if (!channel) continue;
           const embed = buildCallEmbed(call);
           const row = call.audio_path ? buildListenButton(call.id) : null;
@@ -488,6 +521,7 @@ export function startBot({ dbPath, token, rootConfigPath, postChannelId, alertCh
         }
 
         lastSeenId = Math.max(lastSeenId, call.id);
+        setBotState(db, 'bot.lastSeenId', lastSeenId);
 
         // Notable-channel check (keyword + talkgroup-name guard)
         for (const [guildId, guild] of client.guilds.cache) {

@@ -546,6 +546,33 @@ function startRoles() {
     console.log('[watcher] disabled in config');
   }
 
+  // Audio re-check: for calls where audio_path=NULL (raced the encoder),
+  // re-check every 30s to see if the file has appeared.
+  const db = getDb(dbPath);
+  const recheckAudio = setInterval(() => {
+    const missing = db.prepare(`
+      SELECT id, short_name, call_num, audio_path
+      FROM calls
+      WHERE audio_path IS NULL AND created_at > strftime('%s', 'now') - 3600
+      LIMIT 20
+    `).all();
+    if (missing.length === 0) return;
+    for (const c of missing) {
+      // Try to find an audio file under the gateway's data/audio dir
+      // or under the configured recordings dir. The push from SDRBOX
+      // saves with the pattern <short>-<start_time>-<call_num>.<ext>,
+      // so we can derive the expected path.
+      const expectedName = `${c.short_name}-${c.start_time}-${c.call_num}.wav`;
+      const expectedPath = path.join(dataDir, 'audio', expectedName);
+      if (fs.existsSync(expectedPath)) {
+        const stat = fs.statSync(expectedPath);
+        db.prepare('UPDATE calls SET audio_path = ?, audio_size = ?, audio_format = ? WHERE id = ?')
+          .run(expectedPath, stat.size, 'wav', c.id);
+        console.log(`[audio-recheck] backfilled call #${c.id} (${stat.size} bytes)`);
+      }
+    }
+  }, 30 * 1000);
+
   if (sc.transcriber?.enabled && sc.transcriber?.qwenUrl) {
     try {
       roleHandles.transcriber = startTranscriber({ dbPath, qwenUrl: sc.transcriber.qwenUrl, log: console });

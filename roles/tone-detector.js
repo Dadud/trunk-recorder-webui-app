@@ -3,6 +3,32 @@
 import { getDb } from '../lib/db.js';
 import { detectTones } from '../lib/icad.js';
 
+// Upsert a tone_records row. The call_id is UNIQUE, so a retry that finds
+// a call with an existing row (e.g. previously marked 'no_list' or 'error')
+// updates the row in place rather than crashing on the UNIQUE constraint.
+function upsertToneRecord(db, callId, fields) {
+  db.prepare(`
+    INSERT INTO tone_records (call_id, tone_a_hz, tone_b_hz, department_id, confidence, status, notes, detected_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, strftime('%s', 'now'))
+    ON CONFLICT(call_id) DO UPDATE SET
+      tone_a_hz = excluded.tone_a_hz,
+      tone_b_hz = excluded.tone_b_hz,
+      department_id = excluded.department_id,
+      confidence = excluded.confidence,
+      status = excluded.status,
+      notes = excluded.notes,
+      detected_at = strftime('%s', 'now')
+  `).run(
+    callId,
+    fields.tone_a_hz ?? null,
+    fields.tone_b_hz ?? null,
+    fields.department_id ?? null,
+    fields.confidence ?? null,
+    fields.status ?? 'detected',
+    fields.notes ?? null
+  );
+}
+
 export function startToneDetector({ dbPath, intervalMs = 5000, log = console }) {
   const db = getDb(dbPath);
   log.info('[tone-detector] starting');
@@ -16,15 +42,24 @@ export function startToneDetector({ dbPath, intervalMs = 5000, log = console }) 
     if (busy) return;
     busy = true;
     try {
-      // Find calls that have audio, no tone records yet, transcribed OR
-      // older than 60s (in case no transcript ever lands).
+      // Find calls that have audio and either have no tone_records row, or
+      // have a previous error/no_tone/no_list row that's older than the
+      // retry cooldown. Successfully-detected rows are excluded.
       const pending = db.prepare(`
         SELECT c.* FROM calls c
         LEFT JOIN tone_records tr ON tr.call_id = c.id
         LEFT JOIN transcripts t ON t.call_id = c.id
-        WHERE tr.id IS NULL
-          AND c.audio_path IS NOT NULL
+        WHERE c.audio_path IS NOT NULL
           AND (t.id IS NOT NULL OR c.created_at < strftime('%s', 'now') - 60)
+          AND (
+            tr.id IS NULL
+            OR (tr.status IN ('error', 'no_tone', 'no_list')
+                AND tr.detected_at < strftime('%s', 'now') - 300)
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM tone_records tr2
+            WHERE tr2.call_id = c.id AND tr2.status = 'detected'
+          )
         ORDER BY c.recorded_at ASC LIMIT 1
       `).all();
       if (pending.length === 0) return;
@@ -35,8 +70,7 @@ export function startToneDetector({ dbPath, intervalMs = 5000, log = console }) 
       if (tones.length === 0) {
         // No tone list configured; mark the call as "checked, no list" so we
         // don't loop on it. Operator can seed a tone list later.
-        db.prepare('INSERT INTO tone_records (call_id, status, notes) VALUES (?, ?, ?)')
-          .run(call.id, 'no_list', 'No tone list configured');
+        upsertToneRecord(db, call.id, { status: 'no_list', notes: 'No tone list configured' });
         return;
       }
 
@@ -53,26 +87,26 @@ export function startToneDetector({ dbPath, intervalMs = 5000, log = console }) 
           return;
         }
         log.warn(`[tone-detector] call ${call.id} error: ${result.error}`);
-        db.prepare('INSERT INTO tone_records (call_id, status, notes) VALUES (?, ?, ?)')
-          .run(call.id, 'error', result.error?.slice(0, 200));
+        upsertToneRecord(db, call.id, { status: 'error', notes: result.error?.slice(0, 200) });
         return;
       }
 
       const detected = result.tones || [];
       if (detected.length === 0) {
-        db.prepare('INSERT INTO tone_records (call_id, status) VALUES (?, ?)')
-          .run(call.id, 'no_tone');
+        upsertToneRecord(db, call.id, { status: 'no_tone' });
         processed++;
         return;
       }
 
       // Write one tone_record per detected tone (typically 0 or 1)
-      const ins = db.prepare(`
-        INSERT INTO tone_records (call_id, tone_a_hz, tone_b_hz, department_id, confidence)
-        VALUES (?, ?, ?, ?, ?)
-      `);
       for (const t of detected) {
-        ins.run(call.id, t.tone_a_hz, t.tone_b_hz, t.department_id || null, t.confidence || null);
+        upsertToneRecord(db, call.id, {
+          tone_a_hz: t.tone_a_hz,
+          tone_b_hz: t.tone_b_hz,
+          department_id: t.department_id || null,
+          confidence: t.confidence || null,
+          status: 'detected',
+        });
         matched++;
       }
       processed++;
