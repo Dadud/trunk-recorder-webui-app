@@ -234,10 +234,52 @@ export function startBot({ dbPath, token, rootConfigPath, postChannelId, alertCh
       saveRootConfig(writeGuildConfig(getRootConfig(), interaction.guildId, { voiceChannelId: null }));
       return interaction.reply({ content: '🗑️ Voice channel removed.', ephemeral: true });
     }
+
+    if (commandName === 'teardown') {
+      if (!userCanSetup(interaction.member)) {
+        return interaction.reply({ content: 'You need **Manage Channels** to run teardown.', ephemeral: true });
+      }
+      const scannerCats = interaction.guild.channels.cache.filter(c =>
+        c.type === ChannelType.GuildCategory && /scanner/i.test(c.name)
+      );
+      if (scannerCats.size === 0) {
+        return interaction.reply({ content: 'No Scanner categories found.', ephemeral: true });
+      }
+      // Find empty categories (no channels inside) — those are safe to delete.
+      // We keep the one with the most populated children (the active one).
+      const candidates = scannerCats.map(cat => {
+        const children = interaction.guild.channels.cache.filter(c => c.parentId === cat.id);
+        return { cat, children, count: children.size };
+      }).sort((a, b) => b.count - a.count);
+
+      const active = candidates[0];
+      const toDelete = candidates.slice(1).filter(c => c.count === 0); // only delete empty ones
+
+      const lines = [
+        `Found **${scannerCats.size}** Scanner categories.`,
+        `Active (will keep): **${active.cat.name}** with ${active.count} channel(s).`,
+        '',
+        `Empty duplicates that will be removed: **${toDelete.length}**`,
+        ...toDelete.slice(0, 10).map(c => `• \`${c.cat.name}\` (id ${c.cat.id})`),
+        toDelete.length > 10 ? `… and ${toDelete.length - 10} more` : '',
+        '',
+        'Click **Delete** to confirm. The active category is preserved.',
+      ].filter(Boolean);
+
+      const row = {
+        type: 1,
+        components: toDelete.length > 0 ? [
+          { type: 2, custom_id: 'teardown:confirm', label: '🗑️ Delete duplicates', style: 4 },
+          { type: 2, custom_id: 'teardown:cancel', label: 'Cancel', style: 2 },
+        ] : [{ type: 2, custom_id: 'teardown:cancel', label: 'Nothing to delete', style: 2, disabled: true }],
+      };
+      return interaction.reply({ content: lines.join('\n'), components: [row], ephemeral: true });
+    }
   }
 
   async function handleButton(interaction) {
     const [ns, action, value] = interaction.customId.split(':');
+    if (ns === 'teardown') return handleTeardownButton(interaction);
     if (ns !== 'setup') return handleListenButton(interaction);
     const state = getWizardState(interaction.guildId, interaction.user.id) || {};
     if (action === 'layout') {
@@ -333,6 +375,41 @@ export function startBot({ dbPath, token, rootConfigPath, postChannelId, alertCh
         log.error(`[bot] setup failed: ${err.message}\n${err.stack}`);
         return interaction.editReply({ content: `❌ Setup failed: ${err.message}`, embeds: [], components: [] });
       }
+    }
+  }
+
+  async function handleTeardownButton(interaction) {
+    const [ns, action] = interaction.customId.split(':');
+    if (action === 'cancel') {
+      return interaction.update({ content: 'Teardown cancelled.', embeds: [], components: [] });
+    }
+    if (action === 'confirm') {
+      await interaction.deferUpdate();
+      const scannerCats = interaction.guild.channels.cache.filter(c =>
+        c.type === ChannelType.GuildCategory && /scanner/i.test(c.name)
+      );
+      const candidates = scannerCats.map(cat => {
+        const children = interaction.guild.channels.cache.filter(c => c.parentId === cat.id);
+        return { cat, count: children.size };
+      }).sort((a, b) => b.count - a.count);
+      const toDelete = candidates.slice(1).filter(c => c.count === 0);
+
+      let deleted = 0;
+      const errors = [];
+      for (const c of toDelete) {
+        try {
+          await c.cat.delete('Scanner bot /teardown: removing duplicate empty Scanner category');
+          deleted++;
+        } catch (err) {
+          errors.push(`${c.cat.name}: ${err.message}`);
+        }
+      }
+      const lines = [
+        deleted > 0 ? `🗑️ Deleted ${deleted} empty Scanner categor${deleted === 1 ? 'y' : 'ies'}.` : 'No categories were deleted.',
+        errors.length > 0 ? `\nErrors:\n${errors.map(e => `• ${e}`).join('\n')}` : '',
+        '\nYou can re-run `/setup` to populate the remaining category with channels.',
+      ].filter(Boolean).join('\n');
+      return interaction.editReply({ content: lines, components: [] });
     }
   }
 
