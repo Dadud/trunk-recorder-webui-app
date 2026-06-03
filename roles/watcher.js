@@ -8,6 +8,7 @@
 //     (used when watcher runs on the SDR box, store runs on the gateway)
 import chokidar from 'chokidar';
 import path from 'path';
+import fs from 'fs';
 import { buildCallFromJson } from '../lib/sidecar.js';
 import { pushCallToGateway, ingestLocally } from '../lib/push.js';
 import { getDb } from '../lib/db.js';
@@ -33,11 +34,25 @@ export function startWatcher({ recordingsDir, dbPath, pushTo, log = console }) {
   watcher.on('add', async (jsonPath) => {
     if (!jsonPath.endsWith('.json')) return; // only sidecar JSONs; ignore wavs
     try {
-      // Debounce: sidecar lands first, then the audio file arrives ~0-500ms
-      // later. Wait briefly so we can include the audio in the same payload.
-      await sleep(300);
-      // Re-check the audio file pairing (it may have appeared after the
-      // first buildCallFromJson call)
+      // Wait for the audio file to actually land. The sidecar JSON is written
+      // first, then the encoder closes the wav ~200-3000ms later (variable
+      // based on disk pressure and call length). Poll for the wav to exist
+      // AND have a non-trivial size, with a 6s budget. If we time out, send
+      // the call anyway — the gateway will get audio_path=null and the
+      // transcriber/bot will skip it cleanly.
+      const dir = path.dirname(jsonPath);
+      const base = path.basename(jsonPath, '.json');
+      const wavPath = path.join(dir, base + '.wav');
+      const startWait = Date.now();
+      let wavSize = 0;
+      while (Date.now() - startWait < 6000) {
+        try {
+          const stat = fs.statSync(wavPath);
+          if (stat.size > 1000) { wavSize = stat.size; break; }
+        } catch { /* not yet */ }
+        await sleep(150);
+      }
+      if (wavSize === 0) log.warn(`[watcher] no wav for ${base} after 6s, sending audio_path=null`);
       const call = buildCallFromJson(jsonPath);
 
       if (pushTo) {
