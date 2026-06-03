@@ -470,21 +470,58 @@ export function startBot({ dbPath, token, rootConfigPath, postChannelId, alertCh
   //   3. A channel whose topic mentions scanner
   async function autoBootstrapChannel(guild) {
     try {
+      // 1. Ideal: a #scanner-calls text channel (the single-layout convention).
+      //    This is where ALL scanner traffic should land.
       let ch = guild.channels.cache.find(c => c.type === ChannelType.GuildText && c.name === 'scanner-calls');
       if (ch) return ch;
+
+      // 2. Any other non-notable scanner-named text channel.
       ch = guild.channels.cache.find(c =>
-        c.type === ChannelType.GuildText && /scanner/i.test(c.name) && !/notable/i.test(c.name)
+        c.type === ChannelType.GuildText
+        && /scanner/i.test(c.name)
+        && !/notable/i.test(c.name)
+        && !/alert/i.test(c.name)
       );
       if (ch) return ch;
-      ch = guild.channels.cache.find(c =>
-        c.type === ChannelType.GuildText && c.topic && /scanner/i.test(c.topic)
-      );
-      if (ch) return ch;
+
+      // 3. Nothing suitable. Create #scanner-calls ourselves. The bot
+      //    needs the Manage Channels permission to do this; most scanner
+      //    bots are granted it. Falls through to creating it.
+      try {
+        ch = await guild.channels.create({
+          name: 'scanner-calls',
+          type: ChannelType.GuildText,
+          topic: 'All scanner calls (auto-created by the bot).',
+          reason: 'Scanner bot auto-bootstrap: no #scanner-calls channel existed',
+        });
+        log.info(`[bot] auto-created #scanner-calls in ${guild.name} (id ${ch.id})`);
+        return ch;
+      } catch (err) {
+        log.warn(`[bot] could not auto-create #scanner-calls in ${guild.name}: ${err.message}`);
+      }
     } catch (err) {
       log.warn(`[bot] autoBootstrap failed for ${guild.name}: ${err.message}`);
     }
     return null;
   }
+
+  // Run auto-bootstrap at startup for any guild that looks misconfigured.
+  // (Bad auto-bootstrap: layout=multi with a single catchall channel.)
+  async function startupAutoBootstrap() {
+    for (const [, guild] of client.guilds.cache) {
+      let cfg = readGuildConfig(getRootConfig(), guild.id);
+      if (!cfg) continue;
+      const hasCallChannel = cfg.textChannels?.some(c => c.kind === 'all');
+      const misconfigured = cfg.setupComplete && cfg.layout === 'multi' && hasCallChannel;
+      if (!misconfigured) continue;
+      log.info(`[bot] startup: guild ${guild.name} has bad bootstrap (layout=multi with single channel); re-bootstrapping`);
+      cfg = { ...cfg, setupComplete: false };
+      // Force the post loop to re-bootstrap on next tick
+      saveRootConfig(writeGuildConfig(getRootConfig(), guild.id, cfg));
+    }
+  }
+  // Fire-and-forget at startup (no await; it's idempotent on the next loop tick)
+  client.once('clientReady', () => { startupAutoBootstrap().catch(err => log.warn(`[bot] startup bootstrap: ${err.message}`)); });
 
   // ─── Call post loop ──────────────────────────────────────────────────────
   const handle = setInterval(async () => {
@@ -507,15 +544,39 @@ export function startBot({ dbPath, token, rootConfigPath, postChannelId, alertCh
         for (const [guildId, guild] of client.guilds.cache) {
           let cfg = readGuildConfig(getRootConfig(), guildId);
           if (!cfg) continue; // not set up yet
+          // Detect a bad auto-bootstrap (e.g. layout='multi' with only one
+          // catch-all channel) and force a re-bootstrap. This handles the
+          // case where the operator already had #scanner-notable but no
+          // #scanner-calls — we should have created one instead of dumping
+          // all traffic into notable.
+          const hasCallChannel = cfg.textChannels?.some(c => c.kind === 'all');
+          const misconfigured = cfg.setupComplete && cfg.layout === 'multi' && hasCallChannel;
+          if (misconfigured) {
+            log.info(`[bot] guild ${guild.name}: detected misconfigured auto-bootstrap (layout=multi with single channel); re-bootstrapping`);
+            cfg = { ...cfg, setupComplete: false };
+          }
           if (!cfg.setupComplete) {
             // Auto-bootstrap: find an existing scanner channel in the guild
             // and use it. This is the "it should just work" path — don't
             // make the operator run /setup if there's an obvious place to post.
             const auto = await autoBootstrapChannel(guild);
             if (auto) {
-              cfg = { ...cfg, setupComplete: true, textChannels: [{ name: auto.name, id: auto.id, kind: 'all' }], postChannelId: auto.id, autoBootstrapped: true };
+              // Find a separate notable channel if one exists (for keyword alerts).
+              const notable = guild.channels.cache.find(c =>
+                c.type === ChannelType.GuildText && /notable/i.test(c.name)
+              );
+              cfg = {
+                ...cfg,
+                setupComplete: true,
+                layout: 'single',  // single-channel; the calls channel is the destination for all traffic
+                textChannels: [{ name: auto.name, id: auto.id, kind: 'all' }],
+                postChannelId: auto.id,
+                notableChannelId: notable?.id || null,
+                notable: !!notable,  // only true if we found a separate notable channel
+                autoBootstrapped: true,
+              };
               saveRootConfig(writeGuildConfig(getRootConfig(), guildId, cfg));
-              log.info(`[bot] auto-bootstrapped guild ${guild.name} to channel #${auto.name} (${auto.id})`);
+              log.info(`[bot] auto-bootstrapped guild ${guild.name}: calls=#${auto.name}${notable ? ` notable=#${notable.name}` : ' (no notable channel)'}`);
             } else {
               log.warn(`[bot] guild ${guild.name} (${guildId}) has no scanner channel; run /setup or create a #scanner-calls channel.`);
               continue;
