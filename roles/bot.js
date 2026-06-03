@@ -333,6 +333,7 @@ export function startBot({ dbPath, token, rootConfigPath, postChannelId, alertCh
         return interaction.update({ content: 'Setup cancelled.', embeds: [], components: [] });
       }
       // Execute
+      log.info(`[bot] setup confirm: state=${JSON.stringify(state)}, writeConfig=${typeof writeConfig}, rootConfigPath=${rootConfigPath}`);
       await interaction.deferUpdate();
       try {
         const result = await executeSetup(interaction.guild, state, getRootConfig(), dbPath);
@@ -354,6 +355,7 @@ export function startBot({ dbPath, token, rootConfigPath, postChannelId, alertCh
           voiceChannelId: result.voiceChannelId,
         };
         saveRootConfig(writeGuildConfig(getRootConfig(), interaction.guildId, guildCfg));
+        log.info(`[bot] setup: config persisted for guild ${interaction.guildId}, roleId=${result.roleId}, textChannels=${result.textChannels.length}, notable=${result.notableChannelId}, voice=${result.voiceChannelId}`);
         clearWizardState(interaction.guildId, interaction.user.id);
 
         // Seed default keywords (after config is saved; failure here is non-fatal)
@@ -461,6 +463,29 @@ export function startBot({ dbPath, token, rootConfigPath, postChannelId, alertCh
     }
   }
 
+  // ─── Auto-bootstrap: find an existing scanner channel in the guild ───
+  // Without requiring the operator to run /setup. We look for:
+  //   1. A channel named "scanner-calls" (single layout convention)
+  //   2. A channel with "scanner" in the name (any layout, but not notable)
+  //   3. A channel whose topic mentions scanner
+  async function autoBootstrapChannel(guild) {
+    try {
+      let ch = guild.channels.cache.find(c => c.type === ChannelType.GuildText && c.name === 'scanner-calls');
+      if (ch) return ch;
+      ch = guild.channels.cache.find(c =>
+        c.type === ChannelType.GuildText && /scanner/i.test(c.name) && !/notable/i.test(c.name)
+      );
+      if (ch) return ch;
+      ch = guild.channels.cache.find(c =>
+        c.type === ChannelType.GuildText && c.topic && /scanner/i.test(c.topic)
+      );
+      if (ch) return ch;
+    } catch (err) {
+      log.warn(`[bot] autoBootstrap failed for ${guild.name}: ${err.message}`);
+    }
+    return null;
+  }
+
   // ─── Call post loop ──────────────────────────────────────────────────────
   const handle = setInterval(async () => {
     if (!client.isReady()) return;
@@ -480,13 +505,21 @@ export function startBot({ dbPath, token, rootConfigPath, postChannelId, alertCh
 
         // For each guild we're in, post if routing matches
         for (const [guildId, guild] of client.guilds.cache) {
-          const cfg = readGuildConfig(getRootConfig(), guildId);
+          let cfg = readGuildConfig(getRootConfig(), guildId);
           if (!cfg) continue; // not set up yet
           if (!cfg.setupComplete) {
-            // The bot's been invited but /setup never finished. Log once per
-            // missing-config to help the operator notice, then skip.
-            log.warn(`[bot] guild ${guild.name} (${guildId}) is invited but /setup incomplete; skipping calls until admin runs /setup`);
-            continue;
+            // Auto-bootstrap: find an existing scanner channel in the guild
+            // and use it. This is the "it should just work" path — don't
+            // make the operator run /setup if there's an obvious place to post.
+            const auto = await autoBootstrapChannel(guild);
+            if (auto) {
+              cfg = { ...cfg, setupComplete: true, textChannels: [{ name: auto.name, id: auto.id, kind: 'all' }], postChannelId: auto.id, autoBootstrapped: true };
+              saveRootConfig(writeGuildConfig(getRootConfig(), guildId, cfg));
+              log.info(`[bot] auto-bootstrapped guild ${guild.name} to channel #${auto.name} (${auto.id})`);
+            } else {
+              log.warn(`[bot] guild ${guild.name} (${guildId}) has no scanner channel; run /setup or create a #scanner-calls channel.`);
+              continue;
+            }
           }
           if (!cfg.textChannels || cfg.textChannels.length === 0) {
             log.warn(`[bot] guild ${guild.name} (${guildId}) has setupComplete=true but no textChannels; re-run /setup`);
