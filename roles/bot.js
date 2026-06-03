@@ -1,8 +1,26 @@
-// Discord bot role: post call embeds, optional voice channel
-import { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } from 'discord.js';
-import { getDb, getCallsSince, getCallById, matchKeywords, recordPosted, addKeyword, removeKeyword, listKeywords } from '../lib/db.js';
+// Discord bot role: post call embeds, optional voice channel, /setup wizard,
+// /recent, /search, keyword alerts, multi-channel routing.
+import { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, PermissionFlagsBits } from 'discord.js';
+import { getDb, getCallsSince, getCallById, matchKeywords, recordPosted, listKeywords } from '../lib/db.js';
+import { DEFAULT_KEYWORDS, shouldPageKeyword } from '../lib/keywords-defaults.js';
+import {
+  getWizardState, setWizardState, clearWizardState,
+  buildSetupWelcome, buildVisibilityStep, buildNotableStep, buildVoiceStep, buildConfirmStep,
+  executeSetup, userCanSetup, LAYOUTS, VISIBILITY,
+} from '../lib/setup.js';
 
-function buildEmbed(call) {
+function readGuildConfig(rootConfig, guildId) {
+  return rootConfig.scanner?.guilds?.[guildId] || null;
+}
+
+function writeGuildConfig(rootConfig, guildId, partial) {
+  if (!rootConfig.scanner) rootConfig.scanner = {};
+  if (!rootConfig.scanner.guilds) rootConfig.scanner.guilds = {};
+  rootConfig.scanner.guilds[guildId] = { ...(rootConfig.scanner.guilds[guildId] || {}), ...partial };
+  return rootConfig;
+}
+
+function buildCallEmbed(call) {
   const embed = new EmbedBuilder()
     .setTitle(`${call.talkgroup_tag || 'Unknown'} — ${call.talkgroup_description || ''}`)
     .setColor(0x1d4ed8)
@@ -12,12 +30,36 @@ function buildEmbed(call) {
       { name: 'Length', value: `${call.call_length?.toFixed(1) || '?'}s`, inline: true },
       { name: 'Channel', value: call.short_name || '?', inline: true },
     );
+  // Tone detection field, if present
+  if (call.tones && call.tones.length > 0) {
+    const t = call.tones[0];
+    embed.addFields({ name: '🚨 Tone', value: `**${t.department || 'Detected'}** (${t.tone_a_hz}Hz → ${t.tone_b_hz}Hz)`, inline: false });
+  }
   if (call.transcript_text && call.transcript_text.trim()) {
     const trimmed = call.transcript_text.length > 900 ? call.transcript_text.slice(0, 900) + '…' : call.transcript_text;
     embed.addFields({ name: 'Transcript', value: trimmed || '(empty)' });
   } else {
     embed.addFields({ name: 'Transcript', value: '_(pending or unavailable)_' });
   }
+  return embed;
+}
+
+function buildNotableEmbed(call, matchedKeyword) {
+  const embed = new EmbedBuilder()
+    .setTitle(`🚨 NOTABLE — ${call.talkgroup_tag || 'Unknown'}`)
+    .setColor(0xdc2626)
+    .setTimestamp(new Date(call.recorded_at))
+    .setDescription([
+      `**Matched keyword:** \`${matchedKeyword.pattern}\``,
+      `**${matchedKeyword.description || ''}**`,
+      '',
+      call.transcript_text ? `> ${call.transcript_text.slice(0, 500)}` : '_(transcript pending)_',
+    ].join('\n'))
+    .addFields(
+      { name: 'Talkgroup', value: call.talkgroup_description || call.talkgroup_tag || '?', inline: true },
+      { name: 'Frequency', value: `${(call.freq / 1e6).toFixed(4)} MHz`, inline: true },
+      { name: 'Length', value: `${call.call_length?.toFixed(1) || '?'}s`, inline: true },
+    );
   return embed;
 }
 
@@ -30,86 +72,344 @@ function buildListenButton(callId) {
   );
 }
 
-export function startBot({ dbPath, token, postChannelId, alertChannelId, pollIntervalMs = 3000, voiceChannelId = null, log = console }) {
+// Decide which Discord channel a call should go to, given the guild's layout config.
+// Returns the channel ID or null if there's no configured destination.
+function routeCallToChannel(call, guildCfg) {
+  if (!guildCfg) return null;
+  if (guildCfg.layout === 'single') {
+    return guildCfg.textChannels?.find(c => c.kind === 'all')?.id || guildCfg.postChannelId || null;
+  }
+  if (guildCfg.layout === 'grouped') {
+    const group = (call.talkgroup_group || 'Other').toLowerCase();
+    const ch = guildCfg.textChannels?.find(c => c.kind === 'group' && c.group?.toLowerCase() === group);
+    if (ch) return ch.id;
+    return guildCfg.textChannels?.find(c => c.kind === 'group' && c.group?.toLowerCase() === 'other')?.id || null;
+  }
+  if (guildCfg.layout === 'multi') {
+    const ch = guildCfg.textChannels?.find(c => c.kind === 'talkgroup' && Number(c.talkgroup) === Number(call.talkgroup));
+    return ch?.id || null;
+  }
+  return guildCfg.postChannelId || null;
+}
+
+export function startBot({ dbPath, token, rootConfigPath, postChannelId, alertChannelId, voiceChannelId, pollIntervalMs = 3000, log = console, writeConfig }) {
   if (!token) {
     log.warn('[bot] DISCORD_TOKEN not set, bot disabled');
     return { stop: () => {} };
   }
+  if (!writeConfig) {
+    log.warn('[bot] no writeConfig function provided, wizard persistence disabled');
+  }
   const db = getDb(dbPath);
-  const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.GuildVoiceStates] });
+  const client = new Client({
+    intents: [
+      GatewayIntentBits.Guilds,
+      GatewayIntentBits.GuildMessages,
+      GatewayIntentBits.MessageContent,
+      GatewayIntentBits.GuildVoiceStates,
+    ],
+  });
 
   let lastSeenId = db.prepare('SELECT MAX(id) as m FROM posted_messages').get()?.m || 0;
   let totalPosted = 0;
-  let alertCache = new Map(); // callId -> matched keywords (to avoid double alerts)
+  const alertCache = new Map();
+  const notableCache = new Map();
 
-  client.once('ready', () => {
+  // Per-guild setup completion status, read on guildCreate/post time
+  function getRootConfig() {
+    if (!rootConfigPath) return { scanner: { guilds: {} } };
+    try {
+      const fs = require('fs');
+      return JSON.parse(fs.readFileSync(rootConfigPath, 'utf8'));
+    } catch { return { scanner: { guilds: {} } }; }
+  }
+  function saveRootConfig(cfg) {
+    if (!rootConfigPath || !writeConfig) return;
+    try {
+      const fs = require('fs');
+      fs.writeFileSync(rootConfigPath, JSON.stringify(cfg, null, 2));
+    } catch (err) { log.warn(`[bot] failed to persist config: ${err.message}`); }
+  }
+
+  client.once('ready', async () => {
     log.info(`[bot] logged in as ${client.user.tag}`);
-    if (postChannelId) {
-      const ch = client.channels.cache.get(postChannelId);
-      if (ch) log.info(`[bot] will post to #${ch.name}`);
-      else log.warn(`[bot] post channel ${postChannelId} not found in cache`);
+    // Register slash commands globally (Discord caches for up to 1h, but guild commands are instant)
+    // For dev we'll use guild-scoped commands for the first connected guild.
+    const firstGuild = client.guilds.cache.first();
+    if (firstGuild) {
+      try {
+        const { registerCommandsForGuild } = await import('../lib/commands.js');
+        await registerCommandsForGuild(client, firstGuild.id);
+        log.info(`[bot] registered slash commands for guild ${firstGuild.name} (${firstGuild.id})`);
+      } catch (err) { log.warn(`[bot] command registration failed: ${err.message}`); }
     }
   });
 
-  client.on('interactionCreate', async (interaction) => {
-    if (!interaction.isButton()) return;
-    const [action, ...rest] = interaction.customId.split(':');
-    if (action === 'listen') {
-      const callId = Number(rest[0]);
-      const call = getCallById(db, callId);
-      if (!call) return interaction.reply({ content: 'Call not found', ephemeral: true });
-      if (!call.audio_path) return interaction.reply({ content: 'No audio file for this call', ephemeral: true });
+  // On join, post a welcome message in the system channel
+  client.on('guildCreate', async (guild) => {
+    log.info(`[bot] joined guild ${guild.name} (${guild.id}), ${guild.memberCount} members`);
+    try {
+      const { registerCommandsForGuild } = await import('../lib/commands.js');
+      await registerCommandsForGuild(client, guild.id);
+    } catch (err) { log.warn(`[bot] command register on join failed: ${err.message}`); }
+    const sysChannel = guild.systemChannel;
+    if (sysChannel) {
+      const embed = new EmbedBuilder()
+        .setTitle('📡 Scanner Bot ready')
+        .setDescription([
+          'Hi! I post scanner calls (audio + transcripts) from your trunk recorder into Discord.',
+          '',
+          'An admin needs to run `/setup` to create the channels. The wizard is one click per question.',
+          '',
+          '`/recent` — last 5 calls',
+          '`/search <term>` — search transcripts',
+          '`/setup` — create/refresh channels',
+        ].join('\n'))
+        .setColor(0x1d4ed8);
+      sysChannel.send({ embeds: [embed] }).catch(() => {});
+    }
+  });
 
-      // Voice channel logic: only enabled if voiceChannelId is set
-      if (voiceChannelId) {
-        try {
-          const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus } = await import('@discordjs/voice');
-          const conn = joinVoiceChannel({ channelId: voiceChannelId, guildId: interaction.guildId, adapterCreator: interaction.guild.voiceAdapterCreator });
-          const player = createAudioPlayer();
-          const resource = createAudioResource(call.audio_path);
-          conn.subscribe(player);
-          player.play(resource);
-          player.on(AudioPlayerStatus.Idle, () => conn.destroy());
-          conn.on(VoiceConnectionStatus.Destroyed, () => {});
-          await interaction.reply({ content: `🔊 Now playing call #${callId} (${call.talkgroup_tag})`, ephemeral: false });
-        } catch (err) {
-          log.warn(`[bot] voice error: ${err.message}`);
-          await interaction.reply({ content: `🔊 Voice playback failed: ${err.message}. File: ${call.audio_path}`, ephemeral: true });
+  // ─── Slash command handler ────────────────────────────────────────────────
+  client.on('interactionCreate', async (interaction) => {
+    try {
+      if (interaction.isChatInputCommand()) {
+        await handleSlashCommand(interaction);
+      } else if (interaction.isButton()) {
+        await handleButton(interaction);
+      }
+    } catch (err) {
+      log.warn(`[bot] interaction error: ${err.message}`);
+      try { await interaction.reply({ content: `Error: ${err.message}`, ephemeral: true }); } catch {}
+    }
+  });
+
+  async function handleSlashCommand(interaction) {
+    const { commandName } = interaction;
+
+    if (commandName === 'setup') {
+      if (!userCanSetup(interaction.member)) {
+        return interaction.reply({ content: 'You need **Manage Channels** and **Manage Roles** to run setup.', ephemeral: true });
+      }
+      // Start the wizard
+      setWizardState(interaction.guildId, interaction.user.id, { step: 'layout' });
+      const msg = buildSetupWelcome();
+      return interaction.reply({ ...msg, ephemeral: true });
+    }
+
+    if (commandName === 'recent') {
+      const calls = db.prepare(`
+        SELECT c.*, t.text as transcript_text
+        FROM calls c LEFT JOIN transcripts t ON t.call_id = c.id
+        ORDER BY c.recorded_at DESC LIMIT 5
+      `).all();
+      if (calls.length === 0) return interaction.reply({ content: 'No calls yet.', ephemeral: true });
+      const embeds = calls.map(c => buildCallEmbed(c).setFooter({ text: `ID ${c.id} · ${new Date(c.recorded_at).toLocaleString()}` }));
+      return interaction.reply({ embeds, ephemeral: true });
+    }
+
+    if (commandName === 'search') {
+      const q = interaction.options.getString('query', true);
+      const calls = db.prepare(`
+        SELECT c.*, t.text as transcript_text
+        FROM calls c LEFT JOIN transcripts t ON t.call_id = c.id
+        WHERE t.text LIKE ? OR c.talkgroup_tag LIKE ? OR c.talkgroup_description LIKE ?
+        ORDER BY c.recorded_at DESC LIMIT 10
+      `).all(`%${q}%`, `%${q}%`, `%${q}%`);
+      if (calls.length === 0) return interaction.reply({ content: `No matches for "${q}".`, ephemeral: true });
+      const embeds = calls.map(c => buildCallEmbed(c).setFooter({ text: `ID ${c.id} · ${new Date(c.recorded_at).toLocaleString()}` }));
+      return interaction.reply({ content: `Found ${calls.length} match(es) for "${q}":`, embeds, ephemeral: true });
+    }
+
+    if (commandName === 'close') {
+      // Tear down the voice channel
+      const cfg = readGuildConfig(getRootConfig(), interaction.guildId);
+      if (!cfg?.voiceChannelId) return interaction.reply({ content: 'No voice channel configured.', ephemeral: true });
+      const ch = interaction.guild.channels.cache.get(cfg.voiceChannelId);
+      if (!ch) return interaction.reply({ content: 'Voice channel not found (already deleted?).', ephemeral: true });
+      await ch.delete('Scanner bot /close command');
+      saveRootConfig(writeGuildConfig(getRootConfig(), interaction.guildId, { voiceChannelId: null }));
+      return interaction.reply({ content: '🗑️ Voice channel removed.', ephemeral: true });
+    }
+  }
+
+  async function handleButton(interaction) {
+    const [ns, action, value] = interaction.customId.split(':');
+    if (ns !== 'setup') return handleListenButton(interaction);
+    const state = getWizardState(interaction.guildId, interaction.user.id) || {};
+    if (action === 'layout') {
+      state.layout = value;
+      state.step = 'visibility';
+      setWizardState(interaction.guildId, interaction.user.id, state);
+      return interaction.update(buildVisibilityStep(value));
+    }
+    if (action === 'visibility') {
+      state.visibility = value;
+      state.step = 'notable';
+      setWizardState(interaction.guildId, interaction.user.id, state);
+      return interaction.update(buildNotableStep(state.layout, value));
+    }
+    if (action === 'notable') {
+      state.notable = value;
+      state.step = 'voice';
+      setWizardState(interaction.guildId, interaction.user.id, state);
+      return interaction.update(buildVoiceStep(state.layout, state.visibility, value));
+    }
+    if (action === 'voice') {
+      state.voice = value;
+      state.step = 'confirm';
+      setWizardState(interaction.guildId, interaction.user.id, state);
+      return interaction.update(buildConfirmStep(state));
+    }
+    if (action === 'confirm') {
+      if (value === 'no') {
+        clearWizardState(interaction.guildId, interaction.user.id);
+        return interaction.update({ content: 'Setup cancelled.', embeds: [], components: [] });
+      }
+      // Execute
+      await interaction.deferUpdate();
+      try {
+        const result = await executeSetup(interaction.guild, state, getRootConfig(), dbPath);
+        // Seed default keywords
+        let seeded = 0;
+        if (state.notable === 'yes') {
+          for (const k of DEFAULT_KEYWORDS) {
+            addKeyword(db, k.pattern, result.notableChannelId, null);
+            seeded++;
+          }
         }
-      } else {
-        // Voice not configured, just reply with the file path
-        await interaction.reply({ content: `🔊 Voice channel not configured. Audio file: \`${call.audio_path}\``, ephemeral: true });
+        // Persist per-guild config
+        const guildCfg = {
+          setupComplete: true,
+          setupAt: new Date().toISOString(),
+          layout: state.layout,
+          visibility: state.visibility,
+          notable: state.notable === 'yes',
+          voice: state.voice === 'yes',
+          roleId: result.roleId,
+          categoryId: result.categoryId,
+          textChannels: result.textChannels,
+          notableChannelId: result.notableChannelId,
+          voiceChannelId: result.voiceChannelId,
+        };
+        saveRootConfig(writeGuildConfig(getRootConfig(), interaction.guildId, guildCfg));
+        clearWizardState(interaction.guildId, interaction.user.id);
+
+        const summary = new EmbedBuilder()
+          .setTitle('✅ Scanner Bot setup complete')
+          .setColor(0x16a34a)
+          .setDescription([
+            `**Layout:** ${LAYOUTS[state.layout].emoji} ${LAYOUTS[state.layout].label}`,
+            `**Visibility:** ${VISIBILITY[state.visibility].emoji} ${VISIBILITY[state.visibility].label}`,
+            `**Notable channel:** ${state.notable === 'yes' ? '✅' : '❌'}`,
+            `**Voice channel:** ${state.voice === 'yes' ? '✅' : '❌'}`,
+            '',
+            result.roleId ? `Scanner role: <@&${result.roleId}>` : '',
+            `Category: <#${result.categoryId}>`,
+            '',
+            '**Text channels created:**',
+            ...result.textChannels.map(c => `• <#${c.id}>`),
+            result.notableChannelId ? `\n**Notable:** <#${result.notableChannelId}> (seeded with ${seeded} default keywords)` : '',
+            result.voiceChannelId ? `\n**Voice:** <#${result.voiceChannelId}>` : '',
+            '',
+            'You can re-run `/setup` any time to change the layout.',
+          ].filter(Boolean).join('\n'))
+          .setTimestamp();
+        return interaction.editReply({ embeds: [summary], components: [] });
+      } catch (err) {
+        log.error(`[bot] setup failed: ${err.message}\n${err.stack}`);
+        return interaction.editReply({ content: `❌ Setup failed: ${err.message}`, embeds: [], components: [] });
       }
     }
-  });
+  }
 
-  client.login(token);
+  async function handleListenButton(interaction) {
+    const [action, ...rest] = interaction.customId.split(':');
+    if (action !== 'listen') return;
+    const callId = Number(rest[0]);
+    const call = getCallById(db, callId);
+    if (!call) return interaction.reply({ content: 'Call not found', ephemeral: true });
+    if (!call.audio_path) return interaction.reply({ content: 'No audio file for this call', ephemeral: true });
+    const cfg = readGuildConfig(getRootConfig(), interaction.guildId);
+    const vcId = cfg?.voiceChannelId || voiceChannelId;
+    if (!vcId) {
+      return interaction.reply({ content: `🔊 Voice channel not configured. Audio file: \`${call.audio_path}\``, ephemeral: true });
+    }
+    try {
+      const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus } = await import('@discordjs/voice');
+      const conn = joinVoiceChannel({ channelId: vcId, guildId: interaction.guildId, adapterCreator: interaction.guild.voiceAdapterCreator });
+      const player = createAudioPlayer();
+      const resource = createAudioResource(call.audio_path);
+      conn.subscribe(player);
+      player.play(resource);
+      player.on(AudioPlayerStatus.Idle, () => conn.destroy());
+      await interaction.reply({ content: `🔊 Now playing call #${callId} (${call.talkgroup_tag})`, ephemeral: false });
+    } catch (err) {
+      log.warn(`[bot] voice error: ${err.message}`);
+      await interaction.reply({ content: `🔊 Voice playback failed: ${err.message}. File: \`${call.audio_path}\``, ephemeral: true });
+    }
+  }
 
-  // Poll for new calls
+  // ─── Call post loop ──────────────────────────────────────────────────────
   const handle = setInterval(async () => {
-    if (!client.isReady() || !postChannelId) return;
+    if (!client.isReady()) return;
     try {
       const newCalls = getCallsSince(db, lastSeenId, 10);
       for (const call of newCalls) {
         if (call.id <= lastSeenId) continue;
-        const channel = await client.channels.fetch(postChannelId).catch(() => null);
-        if (!channel) continue;
-        const embed = buildEmbed(call);
-        const row = call.audio_path ? buildListenButton(call.id) : null;
-        const msgOpts = { embeds: [embed] };
-        if (row) msgOpts.components = [row];
-        // Attach audio if small enough (<8MB for non-nitro)
-        if (call.audio_path && call.audio_size && call.audio_size < 8 * 1024 * 1024) {
-          const { AttachmentBuilder } = await import('discord.js');
-          msgOpts.files = [new AttachmentBuilder(call.audio_path)];
-        }
-        const msg = await channel.send(msgOpts);
-        recordPosted(db, call.id, msg.id, postChannelId);
-        lastSeenId = Math.max(lastSeenId, call.id);
-        totalPosted++;
-        log.info(`[bot] posted call #${call.id} (${call.talkgroup_tag})`);
 
-        // Keyword alerts
+        // For each guild we're in, post if routing matches
+        for (const [guildId, guild] of client.guilds.cache) {
+          const cfg = readGuildConfig(getRootConfig(), guildId);
+          if (!cfg) continue; // not set up yet
+          const channelId = routeCallToChannel(call, cfg);
+          if (!channelId) continue;
+          const channel = await client.channels.fetch(channelId).catch(() => null);
+          if (!channel) continue;
+          const embed = buildCallEmbed(call);
+          const row = call.audio_path ? buildListenButton(call.id) : null;
+          const msgOpts = { embeds: [embed] };
+          if (row) msgOpts.components = [row];
+          if (call.audio_path && call.audio_size && call.audio_size < 8 * 1024 * 1024) {
+            const { AttachmentBuilder } = await import('discord.js');
+            msgOpts.files = [new AttachmentBuilder(call.audio_path)];
+          }
+          const msg = await channel.send(msgOpts);
+          recordPosted(db, call.id, msg.id, channelId);
+          totalPosted++;
+          log.info(`[bot] posted call #${call.id} (${call.talkgroup_tag}) to #${channel.name} in ${guild.name}`);
+        }
+
+        lastSeenId = Math.max(lastSeenId, call.id);
+
+        // Notable-channel check (keyword + talkgroup-name guard)
+        for (const [guildId, guild] of client.guilds.cache) {
+          const cfg = readGuildConfig(getRootConfig(), guildId);
+          if (!cfg?.notable || !cfg.notableChannelId) continue;
+          const text = call.transcript_text || '';
+          if (!text) continue;
+          const keywords = listKeywords(db);
+          for (const k of keywords) {
+            const cacheKey = `${call.id}:${guildId}:${k.id}`;
+            if (notableCache.has(cacheKey)) continue;
+            if (shouldPageKeyword(k.pattern, call.talkgroup_tag, text)) {
+              const ch = await client.channels.fetch(cfg.notableChannelId).catch(() => null);
+              if (ch) {
+                const embed = buildNotableEmbed(call, k);
+                const ping = cfg.roleId ? `<@&${cfg.roleId}>` : null;
+                await ch.send({ content: ping, embeds: [embed] });
+                notableCache.set(cacheKey, true);
+                log.info(`[bot] notable: call #${call.id} matched "${k.pattern}" in ${guild.name}`);
+              }
+            }
+          }
+          if (notableCache.size > 2000) {
+            const keys = Array.from(notableCache.keys()).slice(0, 1000);
+            keys.forEach(k => notableCache.delete(k));
+          }
+        }
+
+        // Legacy alert channel (for non-notable-channel setups)
         if (alertChannelId && call.transcript_text) {
           const matches = matchKeywords(db, call.transcript_text);
           const fresh = matches.filter(k => !alertCache.has(`${call.id}:${k.id}`));
@@ -117,15 +417,14 @@ export function startBot({ dbPath, token, postChannelId, alertChannelId, pollInt
             alertCache.set(`${call.id}:${k.id}`, true);
             const alertCh = await client.channels.fetch(alertChannelId).catch(() => null);
             if (alertCh) {
-              const alertEmbed = new EmbedBuilder()
+              const embed = new EmbedBuilder()
                 .setTitle(`🚨 Keyword alert: ${k.pattern}`)
                 .setColor(0xdc2626)
                 .setDescription(`Matched in call #${call.id} (${call.talkgroup_tag})\n\n${call.transcript_text.slice(0, 500)}`)
                 .setTimestamp(new Date(call.recorded_at));
-              await alertCh.send({ content: k.role_id ? `<@&${k.role_id}>` : null, embeds: [alertEmbed] });
+              await alertCh.send({ content: k.role_id ? `<@&${k.role_id}>` : null, embeds: [embed] });
             }
           }
-          // Cap cache size
           if (alertCache.size > 1000) {
             const keys = Array.from(alertCache.keys()).slice(0, 500);
             keys.forEach(k => alertCache.delete(k));
@@ -137,11 +436,11 @@ export function startBot({ dbPath, token, postChannelId, alertChannelId, pollInt
     }
   }, pollIntervalMs);
 
+  client.login(token).catch(err => log.error(`[bot] login failed: ${err.message}`));
+
   return {
     stop: () => { clearInterval(handle); client.destroy(); },
     get totalPosted() { return totalPosted; },
-    addKeyword: (p, c, r) => addKeyword(db, p, c, r),
-    removeKeyword: (id) => removeKeyword(db, id),
-    listKeywords: () => listKeywords(db),
+    get client() { return client; },
   };
 }

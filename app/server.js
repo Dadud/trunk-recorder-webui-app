@@ -414,9 +414,11 @@ function startRoles() {
       roleHandles.bot = startBot({
         dbPath,
         token: process.env.DISCORD_TOKEN,
+        rootConfigPath: configPath,
         postChannelId: sc.bot.postChannelId,
         alertChannelId: sc.bot.alertChannelId,
         voiceChannelId: sc.bot.voiceChannelId,
+        writeConfig: writeConfig,
         log: console,
       });
       roleStats.bot = { started: new Date().toISOString() };
