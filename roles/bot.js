@@ -88,7 +88,9 @@ function routeCallToChannel(call, guildCfg) {
   }
   if (guildCfg.layout === 'multi') {
     const ch = guildCfg.textChannels?.find(c => c.kind === 'talkgroup' && Number(c.talkgroup) === Number(call.talkgroup));
-    return ch?.id || null;
+    if (ch) return ch.id;
+    // Fall through to postChannelId for auto-bootstrapped configs that
+    // only have a single catch-all channel
   }
   return guildCfg.postChannelId || null;
 }
@@ -333,7 +335,6 @@ export function startBot({ dbPath, token, rootConfigPath, postChannelId, alertCh
         return interaction.update({ content: 'Setup cancelled.', embeds: [], components: [] });
       }
       // Execute
-      log.info(`[bot] setup confirm: state=${JSON.stringify(state)}, writeConfig=${typeof writeConfig}, rootConfigPath=${rootConfigPath}`);
       await interaction.deferUpdate();
       try {
         const result = await executeSetup(interaction.guild, state, getRootConfig(), dbPath);
@@ -355,7 +356,6 @@ export function startBot({ dbPath, token, rootConfigPath, postChannelId, alertCh
           voiceChannelId: result.voiceChannelId,
         };
         saveRootConfig(writeGuildConfig(getRootConfig(), interaction.guildId, guildCfg));
-        log.info(`[bot] setup: config persisted for guild ${interaction.guildId}, roleId=${result.roleId}, textChannels=${result.textChannels.length}, notable=${result.notableChannelId}, voice=${result.voiceChannelId}`);
         clearWizardState(interaction.guildId, interaction.user.id);
 
         // Seed default keywords (after config is saved; failure here is non-fatal)
@@ -527,7 +527,6 @@ export function startBot({ dbPath, token, rootConfigPath, postChannelId, alertCh
           }
           const channelId = routeCallToChannel(call, cfg);
           if (!channelId) continue;
-          // Skip if we already posted this call to this channel
           if (wasPostedTo(db, call.id, channelId)) {
             log.info(`[bot] call #${call.id} already posted to channel ${channelId}; skipping`);
             continue;
