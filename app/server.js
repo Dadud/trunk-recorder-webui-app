@@ -3,10 +3,11 @@ import fs from 'fs';
 import path from 'path';
 import { execSync } from 'child_process';
 import { fileURLToPath } from 'url';
-import { getDb, getRecentCalls, getCallById, searchCalls, getStats, addKeyword, removeKeyword, listKeywords } from '../lib/db.js';
+import { getDb, getRecentCalls, getCallById, searchCalls, getStats, addKeyword, removeKeyword, listKeywords, listToneList, removeToneListEntry, addToneListEntry, importToneListCsv } from '../lib/db.js';
 import { startWatcher } from '../roles/watcher.js';
 import { startTranscriber } from '../roles/transcriber.js';
 import { startBot } from '../roles/bot.js';
+import { startToneDetector } from '../roles/tone-detector.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -94,7 +95,7 @@ function layout(title, body) {
   .badge { display:inline-block; padding:3px 8px; border-radius:999px; font-size:11px; font-weight:700; background:#ecfdf3; color:#027a48; }
   pre { white-space: pre-wrap; word-break: break-word; background: #0b1020; color: #e5e7eb; padding: 14px; border-radius: 12px; overflow: auto; }
   h1,h2,h3 { margin-top: 0; } .footer-link { margin-top: 12px; }
-  </style></head><body><div class="wrap"><div class="header"><div class="brand">Trunk Recorder Web UI</div><div class="sub">Tiny, friendly setup and runtime management for Trunk Recorder</div><div class="nav"><a href="/">Home</a><a href="/setup">Setup</a><a href="/configuration">Configuration</a><a href="/calls">Calls</a><a href="/discord">Discord</a><a href="/keywords">Keywords</a><a href="/runtime">Runtime</a><a href="/files">Talkgroups & Tags</a></div></div>${body}</div></body></html>`;
+  </style></head><body><div class="wrap"><div class="header"><div class="brand">Trunk Recorder Web UI</div><div class="sub">Tiny, friendly setup and runtime management for Trunk Recorder</div><div class="nav"><a href="/">Home</a><a href="/setup">Setup</a><a href="/configuration">Configuration</a><a href="/calls">Calls</a><a href="/discord">Discord</a><a href="/keywords">Keywords</a><a href="/tones">Tones</a><a href="/runtime">Runtime</a><a href="/files">Talkgroups & Tags</a></div></div>${body}</div></body></html>`;
 }
 
 // ─── API Routes ───────────────────────────────────────────────────────────────
@@ -383,6 +384,77 @@ app.get('/keywords/remove/:id', (req, res) => {
   res.redirect('/keywords');
 });
 
+// ─── Tones page (two-tone sequential paging detection) ───────────────────────
+app.get('/tones', (req, res) => {
+  const db = getDb(dbPath);
+  const tones = listToneList(db);
+  const stats = getStats(db);
+  res.send(layout('Tones', `
+    <div class="card"><h1>Two-Tone Detection</h1><p class="muted">Tone pairs to detect in call audio. Each call is checked against this list; matches get logged with the department name and can be wired to Discord alerts. ${stats.tones} tone(s) detected so far.</p>
+    <div class="note">Tone data lives in the SQLite store (table <code>tone_list</code>). It is separate from trunk-recorder's <code>channel.csv</code> Tone column, which is CTCSS (sub-audible receive filter), not two-tone sequential paging.</div></div>
+    <div class="card"><h2>Add a tone pair</h2>
+      <form method="post" action="/tones/add">
+        <div class="row"><div><label>Talkgroup ID (from channel.csv)</label><input name="talkgroup_id" placeholder="1" /></div>
+        <div><label>Description</label><input name="description" placeholder="Wood County FD Station 1" /></div></div>
+        <div class="row"><div><label>Tone A (Hz)</label><input name="tone_a_hz" required placeholder="584" /></div>
+        <div><label>Tone B (Hz)</label><input name="tone_b_hz" required placeholder="575" /></div>
+        <div><label>Tone A duration (ms)</label><input name="tone_a_ms" value="1000" /></div>
+        <div><label>Tone B duration (ms)</label><input name="tone_b_ms" value="3000" /></div></div>
+        <div class="row"><div><label>Department (shown in alerts)</label><input name="department" placeholder="Wood County FD - Station 1 Pittsville" /></div>
+        <div><label>Notes</label><input name="notes" placeholder="Primary station tone pair" /></div></div>
+        <div class="actions"><button type="submit">Add tone pair</button></div>
+      </form>
+    </div>
+    <div class="card"><h2>Import from CSV</h2>
+      <p class="muted">CSV columns: <code>talkgroup_id,description,tone_a_hz,tone_b_hz,tone_a_ms,tone_b_ms,department,notes</code></p>
+      <form method="post" action="/tones/import" enctype="multipart/form-data"><input type="file" name="csv" accept=".csv" required /><div class="actions"><button type="submit">Import</button></div></form>
+    </div>
+    <div class="card"><h2>Current tone list (${tones.length})</h2>${tones.length === 0 ? '<p class="muted">No tone pairs configured. Add some above or import a CSV.</p>' : `<table style="width:100%; border-collapse: collapse;"><thead><tr style="text-align:left; border-bottom: 1px solid #eaecf0;"><th>TG</th><th>Tone A</th><th>Tone B</th><th>A ms</th><th>B ms</th><th>Department</th><th>Description</th><th>Notes</th><th></th></tr></thead><tbody>${tones.map(t => `<tr style="border-bottom: 1px solid #f2f4f7;"><td>${esc(t.talkgroup_id || '—')}</td><td>${t.tone_a_hz} Hz</td><td>${t.tone_b_hz} Hz</td><td>${t.tone_a_ms}</td><td>${t.tone_b_ms}</td><td>${esc(t.department || '—')}</td><td>${esc(t.description || '—')}</td><td>${esc(t.notes || '—')}</td><td><a class="btn light" href="/tones/remove/${t.id}">Remove</a></td></tr>`).join('')}</tbody></table>`}</div>
+  `));
+});
+
+app.post('/tones/add', (req, res) => {
+  const b = req.body;
+  const db = getDb(dbPath);
+  addToneListEntry(db, {
+    talkgroup_id: b.talkgroup_id ? Number(b.talkgroup_id) : null,
+    description: b.description || null,
+    tone_a_hz: Number(b.tone_a_hz),
+    tone_b_hz: Number(b.tone_b_hz),
+    tone_a_ms: Number(b.tone_a_ms) || 1000,
+    tone_b_ms: Number(b.tone_b_ms) || 3000,
+    department: b.department || null,
+    notes: b.notes || null,
+  });
+  res.redirect('/tones');
+});
+
+app.get('/tones/remove/:id', (req, res) => {
+  const db = getDb(dbPath);
+  removeToneListEntry(db, Number(req.params.id));
+  res.redirect('/tones');
+});
+
+app.post('/tones/import', (req, res) => {
+  const Busboy = require('busboy');
+  const busboy = Busboy({ headers: req.headers });
+  let csvText = null;
+  busboy.on('file', (fieldname, file) => {
+    let buf = '';
+    file.setEncoding('utf8');
+    file.on('data', chunk => { buf += chunk; if (buf.length > 5 * 1024 * 1024) file.resume(); });
+    file.on('end', () => { csvText = buf; });
+  });
+  busboy.on('finish', () => {
+    if (!csvText) { res.redirect('/tones'); return; }
+    const db = getDb(dbPath);
+    const result = importToneListCsv(db, csvText);
+    console.log(`[tones] CSV import: added ${result.added}, errors: ${result.errors.length}`);
+    res.redirect('/tones');
+  });
+  req.pipe(busboy);
+});
+
 const port = process.env.PORT || 8080;
 app.listen(port, () => console.log(`webui listening on http://0.0.0.0:${port}`));
 
@@ -407,6 +479,13 @@ function startRoles() {
     } catch (err) { console.error(`[transcriber] failed to start: ${err.message}`); }
   } else {
     console.log('[transcriber] disabled in config');
+  }
+
+  if (sc.toneDetector?.enabled !== false) {
+    try {
+      roleHandles.toneDetector = startToneDetector({ dbPath, log: console });
+      roleStats.toneDetector = { started: new Date().toISOString() };
+    } catch (err) { console.error(`[tone-detector] failed to start: ${err.message}`); }
   }
 
   if (sc.bot?.enabled && process.env.DISCORD_TOKEN) {

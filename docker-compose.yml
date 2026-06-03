@@ -1,4 +1,5 @@
 services:
+  # Trunk Recorder: receives from the SDR (USB passthrough required on Pi)
   trunk-recorder:
     image: robotastic/trunk-recorder:latest
     container_name: trunk-recorder
@@ -7,14 +8,30 @@ services:
       - ./data/recordings:/recordings
       - ./config:/config
     command: ["--config=/config/config.json"]
+    # Uncomment for host USB access (Pi, dedicated SDR box):
+    # devices:
+    #   - /dev/bus/usb:/dev/bus/usb
+    # privileged: true
 
+  # Web UI + scanner roles (watcher, transcriber, bot, tone-detector)
   webui:
-    image: node:22-alpine
+    build:
+      context: .
+      platforms:
+        - linux/amd64
+        - linux/arm64
+    image: trunk-recorder-webui:latest
     container_name: trunk-recorder-webui
     restart: unless-stopped
     working_dir: /app
-    command: sh -c "npm install && npm start"
     ports:
       - "8080:8080"
     volumes:
-      - ./:/app
+      - ./data/recordings:/recordings:ro
+      - ./data:/app/data
+      - ./config:/app/config
+    env_file:
+      - .env
+    environment:
+      - PORT=8080
+      - NODE_ENV=production
