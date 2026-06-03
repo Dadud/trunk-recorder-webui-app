@@ -8,6 +8,7 @@ import {
   buildSetupWelcome, buildVisibilityStep, buildNotableStep, buildVoiceStep, buildConfirmStep,
   executeSetup, userCanSetup, LAYOUTS, VISIBILITY,
 } from '../lib/setup.js';
+import fs from 'fs';
 
 function readGuildConfig(rootConfig, guildId) {
   return rootConfig.scanner?.guilds?.[guildId] || null;
@@ -132,20 +133,23 @@ export function startBot({ dbPath, token, rootConfigPath, postChannelId, alertCh
   const channelCache = new Map(); // id -> { channel, fetchedAt }
   const CHANNEL_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
-  // Per-guild setup completion status, read on guildCreate/post time
+  // Per-guild setup completion status, read on guildCreate/post time.
+  // Use the writeConfig callback provided by the server (which knows how to
+  // write via fs in the ESM context). Use top-level fs import for reading
+  // since we control the import path.
   function getRootConfig() {
     if (!rootConfigPath) return { scanner: { guilds: {} } };
     try {
-      const fs = require('fs');
       return JSON.parse(fs.readFileSync(rootConfigPath, 'utf8'));
     } catch { return { scanner: { guilds: {} } }; }
   }
   function saveRootConfig(cfg) {
-    if (!rootConfigPath || !writeConfig) return;
+    if (!writeConfig) { log.warn('[bot] saveRootConfig called but no writeConfig callback'); return; }
     try {
-      const fs = require('fs');
-      fs.writeFileSync(rootConfigPath, JSON.stringify(cfg, null, 2));
-    } catch (err) { log.warn(`[bot] failed to persist config: ${err.message}`); }
+      writeConfig(cfg);
+    } catch (err) {
+      log.warn(`[bot] failed to persist config: ${err.message}`);
+    }
   }
 
   // discord.js v14 uses 'ready'; v15 renames to 'clientReady'. We're on v14.26.4
